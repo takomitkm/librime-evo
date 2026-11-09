@@ -350,18 +350,32 @@ TEST(RimeRewriteStoreTest,
   std::filesystem::remove(file);
 }
 
-// S8：索引字节损坏必须被拒收（干净失败，不崩溃）。导出面只有 OpenCached，
-// 内部 Open 的失败路径经它触达。
+// S8：索引损坏必须被拒收（干净失败，不崩溃）。导出面只有 OpenCached。
+// 两个腐蚀面：结构位（stage id 字段，解析层即拒）与 schema 名字节
+// （解析层容忍的垃圾名，只有 index_hash 抓得住）。
 TEST(RimeRewriteStoreTest, CorruptIndexRejectedAndOpenFailsCleanly) {
   const path file = TestPath("corrupt");
   std::filesystem::remove(file);
   const RewriteStageId s1 = TestId(1);
   CommitMinimalStore(file, s1);
-  string bytes = ReadFileBytes(file);
-  ASSERT_GT(bytes.size(), 128u);
-  bytes.back() = static_cast<char>(bytes.back() ^ 0xFF);  // 索引位于文件末尾
-  WriteFileBytes(file, bytes);
-  EXPECT_FALSE(RewriteStore::OpenCached(file));
+  const string pristine = ReadFileBytes(file);  // 两个案例各自从同一完好态派生
+  {
+    // 结构位：文件末尾 = 末绑定 stage id 的低 64 位，翻转后引用失配。
+    string bytes = pristine;
+    ASSERT_GT(bytes.size(), 128u);
+    bytes.back() = static_cast<char>(bytes.back() ^ 0xFF);
+    WriteFileBytes(file, bytes);
+    EXPECT_FALSE(RewriteStore::OpenCached(file));
+  }
+  {
+    // 仅哈希可检测：schema 名字节翻转，索引结构完全合法。
+    string bytes = pristine;
+    const auto name_pos = bytes.find("schemaA");
+    ASSERT_NE(string::npos, name_pos);
+    bytes[name_pos + 2] = static_cast<char>(bytes[name_pos + 2] ^ 0xFF);
+    WriteFileBytes(file, bytes);
+    EXPECT_FALSE(RewriteStore::OpenCached(file));
+  }
   std::filesystem::remove(file);
 }
 

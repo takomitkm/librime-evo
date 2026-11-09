@@ -62,7 +62,7 @@ CommitWorkspace 恒 false 且注册表条目滞留（按协议以 AbortWorkspace
 
 | 变异 | 位置 | 期望变红 |
 |---|---|---|
-| V1 | rewrite_store.cc ParseStoreIndex：去掉 index_hash 校验 | S8 |
+| V1 | rewrite_store.cc ParseStoreIndex：去掉 index_hash 校验 | S8（检测面=schema 名字节：解析层容忍的垃圾名，结构校验全放行，只有哈希拦得住；结构位翻转由解析层兜底，不构成 V1 的红） |
 | V2 | rewrite_store.cc CommitWorkspace：去掉 WorkspaceFailed 拒交 | S2 |
 | V3 | rewrite_store.cc RestoreRewriteWorkspace：去掉 resize 截断 | S4 |
 | V4 | rewrite_store.cc AppendStage：去掉 HasStage 幂等短路 | S3 |
