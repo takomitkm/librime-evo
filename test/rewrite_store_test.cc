@@ -582,8 +582,9 @@ TEST(RimeRewritePackTest, PhraseMissFallsBackToSingleChar) {
   string result;
   ASSERT_TRUE(pack->ConvertSentence("axb", &result));
   EXPECT_EQ("甲xb", result);
-  ASSERT_FALSE(pack->ConvertSentence("xb", &result));  // x 恒等 + b 未匹配
-  EXPECT_EQ("xb", result);
+  // 恒等 + 未匹配：changed=false，惰性拷贝设计下 result 保持为空
+  EXPECT_FALSE(pack->ConvertSentence("xb", &result));
+  EXPECT_TRUE(result.empty());
   pack.reset();
   std::filesystem::remove(file);
 }
@@ -610,9 +611,9 @@ TEST(RimeRewritePackTest, IdentityReplacementNotChanged) {
   ASSERT_TRUE(pack);
   string result;
   EXPECT_FALSE(pack->ConvertSentence("x", &result));
-  EXPECT_EQ("x", result);
+  EXPECT_TRUE(result.empty());  // 惰性拷贝：无变化时不构造结果串
   EXPECT_FALSE(pack->ConvertSentence("qxq", &result));
-  EXPECT_EQ("qxq", result);
+  EXPECT_TRUE(result.empty());
   ASSERT_TRUE(pack->ConvertSentence("ax", &result));  // a 变化 -> 整句 true
   EXPECT_EQ("甲x", result);
   pack.reset();
@@ -628,7 +629,7 @@ TEST(RimeRewritePackTest, UnmatchableRunsVerbatimUtf8) {
   ASSERT_TRUE(pack->ConvertSentence("q界r", &result));
   EXPECT_EQ("q界界r", result);
   EXPECT_FALSE(pack->ConvertSentence("qwr", &result));
-  EXPECT_EQ("qwr", result);
+  EXPECT_TRUE(result.empty());  // 惰性拷贝
   pack.reset();
   std::filesystem::remove(file);
 }
@@ -702,7 +703,9 @@ TEST(RimeRewritePackTest, IncrementalMatchesOneShot) {
     const bool inc_changed =
         pack->ConvertSentenceIncremental(text, &state, &metrics);
     EXPECT_EQ(one_changed, inc_changed);
-    EXPECT_EQ(one_shot, state.output);
+    // 惰性拷贝契约：changed=false 时一次性结果为空，期望输出=原文本
+    const string& expected = one_changed ? one_shot : text;
+    EXPECT_EQ(expected, state.output);
   }
   EXPECT_GT(metrics.prefix_reuse_calls, 0u);  // 复用路径确实被踩过
   pack.reset();

@@ -64,7 +64,10 @@ CommitWorkspace 恒 false 且注册表条目滞留（按协议以 AbortWorkspace
 多值键句中只取首值；value==源文本 的恒等替换不计 changed；不可匹配段按 UTF-8 标量
 整段原样保留；探针停在输入末尾（可能被后续追加延长）为 append-sensitive——决策不缓存、
 由 frontier 记录续探点，纯追加时从断点续探；**增量转换必须与一次性转换逐字节等价**
-（对拍 oracle）。测试挂 `test/rewrite_store_test.cc` 的 RimeRewritePackTest。
+（对拍 oracle，归一化规则见 T4/T6）。**惰性拷贝契约：一次性 ConvertSentence 在
+changed=false 时 result 保持为空**（调用方只在 changed=true 时读结果），而增量路径的
+state.output 始终持有全文——等价对拍须按此归一化。测试挂 `test/rewrite_store_test.cc`
+的 RimeRewritePackTest。
 
 | 编号 | 类别 | 机制（会怎么坏） | 观察 | 用例 |
 |---|---|---|---|---|
