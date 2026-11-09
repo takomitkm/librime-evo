@@ -630,6 +630,9 @@ TEST(RimeRewritePackTest, UnmatchableRunsVerbatimUtf8) {
   EXPECT_EQ("q界界r", result);
   EXPECT_FALSE(pack->ConvertSentence("qwr", &result));
   EXPECT_TRUE(result.empty());  // 惰性拷贝
+  // 变化发生之后的不可匹配段仍须原样保留（skip 分支的 changed 追加路径）
+  ASSERT_TRUE(pack->ConvertSentence("aq", &result));
+  EXPECT_EQ("甲q", result);
   pack.reset();
   std::filesystem::remove(file);
 }
