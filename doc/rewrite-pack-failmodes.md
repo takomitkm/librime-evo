@@ -21,6 +21,12 @@ revert 复绿。命中关系：V1→S8、V2→S2、V3→S4、V4→S3、V5→S5�
 由 Writer::Open 与 BeginWorkspace 截断回收；abort = 恢复超块头 + resize 截断
 （RestoreRewriteWorkspace）；空快照提交 = 删除整个 store 文件。
 
+**Writer 调用序契约**（rewrite_compiler.cc:628-634 定）：一次性 writer 只调
+`BeginWorkspace`（注册进程级 workspace），真正干活的 writer 以 `Open()` 加入后才进入
+事务。反序调用（Open 先于 BeginWorkspace）事务不会挂上——CommitSchema 会静默直提、
+CommitWorkspace 恒 false 且注册表条目滞留（按协议以 AbortWorkspace 收尾可清）。
+本表全部用例按生产协议书写；反序行为的进一步收紧（显式报错）列为对上游的建议，不在测试内钉死。
+
 ## 登记
 
 | 编号 | 类别 | 机制（会怎么坏） | 结果类别 | 观察 | 用例 |

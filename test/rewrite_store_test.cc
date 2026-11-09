@@ -62,11 +62,15 @@ void WriteFileBytes(const path& file, const string& bytes) {
   out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
 }
 
-// 提交一个最小 store：schemaA/sect -> 单 stage。
+// 生产协议（rewrite_compiler.cc）：一次性 writer 只调 BeginWorkspace 注册
+// 全局 workspace；真正干活的 writer 经 Open() 加入后才进入事务。
 void CommitMinimalStore(const path& file, const RewriteStageId& stage_id) {
+  {
+    RewriteStoreWriter starter(file);
+    ASSERT_TRUE(starter.BeginWorkspace());
+  }
   RewriteStoreWriter writer(file);
   ASSERT_TRUE(writer.Open());
-  ASSERT_TRUE(writer.BeginWorkspace());
   ASSERT_TRUE(writer.AppendStage(stage_id, MakeStage({{"a", "甲", ""}})));
   vector<RewriteStageBinding> bindings;
   bindings.push_back({"sect", {stage_id}});
@@ -81,9 +85,12 @@ TEST(RimeRewriteStoreTest, WorkspaceCommitRoundTripAndBindings) {
   const path file = TestPath("roundtrip");
   std::filesystem::remove(file);
   {
+    {
+      RewriteStoreWriter starter(file);
+      ASSERT_TRUE(starter.BeginWorkspace());
+    }
     RewriteStoreWriter writer(file);
     ASSERT_TRUE(writer.Open());
-    ASSERT_TRUE(writer.BeginWorkspace());
     const RewriteStageId s1 = TestId(1);
     const RewriteStageId s2 = TestId(2);
     ASSERT_TRUE(writer.AppendStage(s1, MakeStage({{"a", "甲", ""}})));
@@ -128,9 +135,12 @@ TEST(RimeRewriteStoreTest,
   CommitMinimalStore(file, s1);
   const auto committed = FileSize(file);
   {
+    {
+      RewriteStoreWriter starter(file);
+      ASSERT_TRUE(starter.BeginWorkspace());
+    }
     RewriteStoreWriter writer(file);
     ASSERT_TRUE(writer.Open());
-    ASSERT_TRUE(writer.BeginWorkspace());
     ASSERT_TRUE(writer.AppendStage(s2, MakeStage({{"b", "乙", ""}})));
     vector<RewriteStageBinding> bindings;
     bindings.push_back({"sect", {s1, s2}});
@@ -157,9 +167,12 @@ TEST(RimeRewriteStoreTest,
 TEST(RimeRewriteStoreTest, AppendStageIdempotentAndEmptyRejected) {
   const path file = TestPath("idempotent");
   std::filesystem::remove(file);
+  {
+    RewriteStoreWriter starter(file);
+    ASSERT_TRUE(starter.BeginWorkspace());
+  }
   RewriteStoreWriter writer(file);
   ASSERT_TRUE(writer.Open());
-  ASSERT_TRUE(writer.BeginWorkspace());
   const RewriteStageId s1 = TestId(1);
   ASSERT_TRUE(writer.AppendStage(s1, MakeStage({{"a", "甲", ""}})));
   const auto after_first = FileSize(file);
@@ -191,9 +204,12 @@ TEST(RimeRewriteStoreTest, AbortWorkspaceTruncatesPhysicalFile) {
   CommitMinimalStore(file, s1);
   const auto committed = FileSize(file);
   {
+    {
+      RewriteStoreWriter starter(file);
+      ASSERT_TRUE(starter.BeginWorkspace());
+    }
     RewriteStoreWriter writer(file);
     ASSERT_TRUE(writer.Open());
-    ASSERT_TRUE(writer.BeginWorkspace());
     ASSERT_TRUE(writer.AppendStage(s2, MakeStage({{"b", "乙", ""}})));
     EXPECT_GT(FileSize(file), committed);  // 直写发生了
     EXPECT_TRUE(writer.AbortWorkspace());
@@ -236,9 +252,12 @@ TEST(RimeRewriteStoreTest, RetainSchemasDropsDeadSchemas) {
   const RewriteStageId s1 = TestId(1);
   const RewriteStageId s2 = TestId(2);
   {
+    {
+      RewriteStoreWriter starter(file);
+      ASSERT_TRUE(starter.BeginWorkspace());
+    }
     RewriteStoreWriter writer(file);
     ASSERT_TRUE(writer.Open());
-    ASSERT_TRUE(writer.BeginWorkspace());
     ASSERT_TRUE(writer.AppendStage(s1, MakeStage({{"a", "甲", ""}})));
     ASSERT_TRUE(writer.AppendStage(s2, MakeStage({{"b", "乙", ""}})));
     vector<RewriteStageBinding> bindings;
@@ -250,9 +269,12 @@ TEST(RimeRewriteStoreTest, RetainSchemasDropsDeadSchemas) {
     ASSERT_TRUE(writer.CommitWorkspace());
   }
   {
+    {
+      RewriteStoreWriter starter(file);
+      ASSERT_TRUE(starter.BeginWorkspace());
+    }
     RewriteStoreWriter writer(file);
     ASSERT_TRUE(writer.Open());
-    ASSERT_TRUE(writer.BeginWorkspace());
     EXPECT_TRUE(writer.RetainSchemas({"schemaA"}));
     ASSERT_TRUE(writer.CommitWorkspace());
   }
@@ -265,9 +287,12 @@ TEST(RimeRewriteStoreTest, RetainSchemasDropsDeadSchemas) {
   EXPECT_FALSE(store->OpenStage(s2));  // 死 stage 不再可达
   {
     // 清空全部 schema -> 提交时删除整个文件
+    {
+      RewriteStoreWriter starter(file);
+      ASSERT_TRUE(starter.BeginWorkspace());
+    }
     RewriteStoreWriter writer(file);
     ASSERT_TRUE(writer.Open());
-    ASSERT_TRUE(writer.BeginWorkspace());
     EXPECT_TRUE(writer.RetainSchemas({}));
     ASSERT_TRUE(writer.CommitWorkspace());
   }
@@ -286,9 +311,12 @@ TEST(RimeRewriteStoreTest,
   vector<RewriteStageBinding> same_bindings;
   same_bindings.push_back({"sect", {s1, s2}});
   {
+    {
+      RewriteStoreWriter starter(file);
+      ASSERT_TRUE(starter.BeginWorkspace());
+    }
     RewriteStoreWriter writer(file);
     ASSERT_TRUE(writer.Open());
-    ASSERT_TRUE(writer.BeginWorkspace());
     ASSERT_TRUE(writer.AppendStage(s2, MakeStage({{"b", "乙", ""}})));
     ASSERT_TRUE(writer.CommitSchema("schemaA", same_bindings));
     ASSERT_TRUE(writer.CommitWorkspace());
@@ -303,9 +331,12 @@ TEST(RimeRewriteStoreTest,
   const auto size_before = FileSize(file);
   {
     // 内容未变的干净提交：不得产生任何写入
+    {
+      RewriteStoreWriter starter(file);
+      ASSERT_TRUE(starter.BeginWorkspace());
+    }
     RewriteStoreWriter writer(file);
     ASSERT_TRUE(writer.Open());
-    ASSERT_TRUE(writer.BeginWorkspace());
     ASSERT_TRUE(writer.CommitSchema("schemaA", same_bindings));
     ASSERT_TRUE(writer.CommitWorkspace());
   }
@@ -335,9 +366,12 @@ TEST(RimeRewriteStoreTest, CorruptIndexRejectedAndOpenFailsCleanly) {
 TEST(RimeRewriteStoreTest, CommitSchemaValidatesBindings) {
   const path file = TestPath("validate");
   std::filesystem::remove(file);
+  {
+    RewriteStoreWriter starter(file);
+    ASSERT_TRUE(starter.BeginWorkspace());
+  }
   RewriteStoreWriter writer(file);
   ASSERT_TRUE(writer.Open());
-  ASSERT_TRUE(writer.BeginWorkspace());
   const RewriteStageId s1 = TestId(1);
   ASSERT_TRUE(writer.AppendStage(s1, MakeStage({{"a", "甲", ""}})));
   EXPECT_FALSE(writer.CommitSchema("", {}));
@@ -357,9 +391,12 @@ TEST(RimeRewriteStoreTest, WorkspaceReentryGuardAndSecondWriterJoins) {
   const RewriteStageId s1 = TestId(1);
   CommitMinimalStore(file, s1);
   {
+    {
+      RewriteStoreWriter starter(file);
+      ASSERT_TRUE(starter.BeginWorkspace());
+    }
     RewriteStoreWriter writer(file);
     ASSERT_TRUE(writer.Open());
-    ASSERT_TRUE(writer.BeginWorkspace());
     EXPECT_FALSE(writer.BeginWorkspace());  // 重入拒绝
     RewriteStoreWriter second(file);
     ASSERT_TRUE(second.Open());  // 加入现 workspace（并回收尾巴）
@@ -378,9 +415,12 @@ TEST(RimeRewritePackTest, BuildThroughStoreRoundTripWithPreedit) {
   std::filesystem::remove(file);
   const RewriteStageId s1 = TestId(1);
   {
+    {
+      RewriteStoreWriter starter(file);
+      ASSERT_TRUE(starter.BeginWorkspace());
+    }
     RewriteStoreWriter writer(file);
     ASSERT_TRUE(writer.Open());
-    ASSERT_TRUE(writer.BeginWorkspace());
     ASSERT_TRUE(writer.AppendStage(s1, MakeStage({
                                            {"a", "甲", ""},
                                            {"a", "乙", "preA"},
