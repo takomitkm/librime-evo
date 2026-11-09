@@ -581,3 +581,277 @@ TEST(RimeUserDbManualOrderTest, UnpinnedNeighborWithDifferentCodeIsIgnored) {
   ASSERT_TRUE(db.Close());
   ASSERT_TRUE(db.Remove());
 }
+
+// F1：SetManual 不得挤占他人固定位；冲突必须整体失败、零改动。
+TEST(RimeUserDbManualOrderTest, SetManualRefusesOccupiedSlotAndLeavesNoTrace) {
+  using RankDb = UserDbWrapper<LevelDb>;
+  RankDb db(path{"manual_set_occupied.userdb"}, "manual_set_occupied");
+  if (db.Exists()) {
+    ASSERT_TRUE(db.Remove());
+  }
+  ASSERT_TRUE(db.Open());
+  ASSERT_TRUE(db.Update("ni \t泥", "3,1,10,3,1"));
+  ASSERT_TRUE(db.Update("ni \t你", "1,2,11,2,2"));
+  ASSERT_TRUE(db.MetaUpdate("/manual_clock", "2"));
+  EXPECT_FALSE(user_manual_order::SetManual(&db, "ni ", "泥", 2));
+  string value;
+  ASSERT_TRUE(db.Fetch("ni \t泥", &value));
+  EXPECT_EQ(value, "3,1,10,3,1");
+  ASSERT_TRUE(db.Fetch("ni \t你", &value));
+  EXPECT_EQ(value, "1,2,11,2,2");
+  string clock;
+  ASSERT_TRUE(db.MetaFetch("/manual_clock", &clock));
+  EXPECT_EQ(clock, "2");
+  // 重钉到自己已占据的位置是合法的（occupant == key）。
+  EXPECT_TRUE(user_manual_order::SetManual(&db, "ni ", "泥", 3));
+  ASSERT_TRUE(db.Fetch("ni \t泥", &value));
+  UserDbState state;
+  ASSERT_TRUE(state.Unpack(value));
+  EXPECT_EQ(state.position, 3);
+  EXPECT_GT(state.manual_stamp, 2u);
+  ASSERT_TRUE(db.Close());
+  ASSERT_TRUE(db.Remove());
+}
+
+// F2：空闲位正常钉选，自动学习字段不受影响。
+TEST(RimeUserDbManualOrderTest, SetManualPreservesLearning) {
+  using RankDb = UserDbWrapper<LevelDb>;
+  RankDb db(path{"manual_set_learning.userdb"}, "manual_set_learning");
+  if (db.Exists()) {
+    ASSERT_TRUE(db.Remove());
+  }
+  ASSERT_TRUE(db.Open());
+  ASSERT_TRUE(db.Update("ni \t泥", "3,1,10,0,0"));
+  EXPECT_TRUE(user_manual_order::SetManual(&db, "ni ", "泥", 2));
+  string value;
+  ASSERT_TRUE(db.Fetch("ni \t泥", &value));
+  UserDbState state;
+  ASSERT_TRUE(state.Unpack(value));
+  EXPECT_EQ(state.position, 2);
+  EXPECT_GT(state.manual_stamp, 0u);
+  EXPECT_EQ(state.commits, 3);
+  EXPECT_DOUBLE_EQ(state.dynamic, 1.0);
+  EXPECT_EQ(state.last_tick, 10u);
+  ASSERT_TRUE(db.Close());
+  ASSERT_TRUE(db.Remove());
+}
+
+// F3：时钟必须取 max(墙钟, 已存+1)；已存钟远超墙钟时也要递增，
+// 否则同步后旧版排序会复活。
+TEST(RimeUserDbManualOrderTest,
+     ManualClockBeatsStoredClockEvenBehindWallClock) {
+  using RankDb = UserDbWrapper<LevelDb>;
+  RankDb db(path{"manual_clock_beats.userdb"}, "manual_clock_beats");
+  if (db.Exists()) {
+    ASSERT_TRUE(db.Remove());
+  }
+  ASSERT_TRUE(db.Open());
+  ASSERT_TRUE(db.Update("ni \t泥", "3,1,10,0,0"));
+  ASSERT_TRUE(db.MetaUpdate("/manual_clock", "cre66i9s"));  // 10^12
+  EXPECT_TRUE(user_manual_order::SetManual(&db, "ni ", "泥", 2));
+  string value;
+  ASSERT_TRUE(db.Fetch("ni \t泥", &value));
+  UserDbState state;
+  ASSERT_TRUE(state.Unpack(value));
+  EXPECT_EQ(state.manual_stamp, 1000000000001ULL);
+  string clock;
+  ASSERT_TRUE(db.MetaFetch("/manual_clock", &clock));
+  EXPECT_EQ(clock, "cre66i9t");
+  ASSERT_TRUE(db.Close());
+  ASSERT_TRUE(db.Remove());
+}
+
+// F4：/manual_clock 损坏（非法 base36）时手排整体失败，不覆盖任何记录。
+TEST(RimeUserDbManualOrderTest, CorruptManualClockFailsWithoutWrites) {
+  using RankDb = UserDbWrapper<LevelDb>;
+  RankDb db(path{"manual_clock_corrupt.userdb"}, "manual_clock_corrupt");
+  if (db.Exists()) {
+    ASSERT_TRUE(db.Remove());
+  }
+  ASSERT_TRUE(db.Open());
+  ASSERT_TRUE(db.Update("ni \t泥", "3,1,10,0,0"));
+  ASSERT_TRUE(db.MetaUpdate("/manual_clock", "AB"));
+  EXPECT_FALSE(user_manual_order::SetManual(&db, "ni ", "泥", 2));
+  string value;
+  ASSERT_TRUE(db.Fetch("ni \t泥", &value));
+  EXPECT_EQ(value, "3,1,10,0,0");
+  string clock;
+  ASSERT_TRUE(db.MetaFetch("/manual_clock", &clock));
+  EXPECT_EQ(clock, "AB");
+  ASSERT_TRUE(db.Close());
+  ASSERT_TRUE(db.Remove());
+}
+
+// F5：事务重入保护——外部事务内手排必须拒绝，事务外同一操作成功。
+TEST(RimeUserDbManualOrderTest, ManualOpsRefuseInsideTransaction) {
+  using RankDb = UserDbWrapper<LevelDb>;
+  RankDb db(path{"manual_in_tx.userdb"}, "manual_in_tx");
+  if (db.Exists()) {
+    ASSERT_TRUE(db.Remove());
+  }
+  ASSERT_TRUE(db.Open());
+  ASSERT_TRUE(db.Update("ni \t泥", "3,1,10,0,0"));
+  ASSERT_TRUE(db.BeginTransaction());
+  EXPECT_FALSE(user_manual_order::SetManual(&db, "ni ", "泥", 2));
+  EXPECT_FALSE(
+      user_manual_order::MoveAdjacent(&db, "ni ", "泥", "", "", 2, -1));
+  ASSERT_TRUE(db.AbortTransaction());
+  EXPECT_TRUE(user_manual_order::SetManual(&db, "ni ", "泥", 2));
+  string value;
+  ASSERT_TRUE(db.Fetch("ni \t泥", &value));
+  UserDbState state;
+  ASSERT_TRUE(state.Unpack(value));
+  EXPECT_EQ(state.position, 2);
+  ASSERT_TRUE(db.Close());
+  ASSERT_TRUE(db.Remove());
+}
+
+// F6：ResetAuto 标记删除保留手排；二次调用幂等、零写入。
+TEST(RimeUserDbManualOrderTest, ResetAutoSemantics) {
+  using RankDb = UserDbWrapper<LevelDb>;
+  RankDb db(path{"manual_reset_auto.userdb"}, "manual_reset_auto");
+  if (db.Exists()) {
+    ASSERT_TRUE(db.Remove());
+  }
+  ASSERT_TRUE(db.Open());
+  ASSERT_TRUE(db.MetaUpdate("/tick", "100"));
+  ASSERT_TRUE(db.Update("ni \t泥", "3,1,10,2,7"));
+  EXPECT_TRUE(user_manual_order::ResetAuto(&db, "ni ", "泥"));
+  string value;
+  ASSERT_TRUE(db.Fetch("ni \t泥", &value));
+  UserDbState state;
+  ASSERT_TRUE(state.Unpack(value));
+  EXPECT_EQ(state.commits, -3);
+  EXPECT_EQ(state.last_tick, 100u);
+  EXPECT_EQ(state.position, 2);
+  EXPECT_EQ(state.manual_stamp, 7u);
+  const string after_first = value;
+  EXPECT_TRUE(user_manual_order::ResetAuto(&db, "ni ", "泥"));
+  ASSERT_TRUE(db.Fetch("ni \t泥", &value));
+  EXPECT_EQ(value, after_first);
+  ASSERT_TRUE(db.Close());
+  ASSERT_TRUE(db.Remove());
+}
+
+// F6 辅：/tick 损坏时 ResetAuto 拒绝且不改记录；修好后可恢复执行。
+TEST(RimeUserDbManualOrderTest, ResetAutoRejectsCorruptTick) {
+  using RankDb = UserDbWrapper<LevelDb>;
+  RankDb db(path{"manual_reset_tick.userdb"}, "manual_reset_tick");
+  if (db.Exists()) {
+    ASSERT_TRUE(db.Remove());
+  }
+  ASSERT_TRUE(db.Open());
+  ASSERT_TRUE(db.Update("ni \t泥", "3,1,10,0,0"));
+  ASSERT_TRUE(db.MetaUpdate("/tick", "abc"));
+  EXPECT_FALSE(user_manual_order::ResetAuto(&db, "ni ", "泥"));
+  string value;
+  ASSERT_TRUE(db.Fetch("ni \t泥", &value));
+  EXPECT_EQ(value, "3,1,10,0,0");
+  ASSERT_TRUE(db.MetaUpdate("/tick", "10"));
+  EXPECT_TRUE(user_manual_order::ResetAuto(&db, "ni ", "泥"));
+  ASSERT_TRUE(db.Fetch("ni \t泥", &value));
+  UserDbState state;
+  ASSERT_TRUE(state.Unpack(value));
+  EXPECT_EQ(state.commits, -3);
+  ASSERT_TRUE(db.Close());
+  ASSERT_TRUE(db.Remove());
+}
+
+// F7：ResetManual 只清手排保留学习，时钟必须前进；缺失记录不创建。
+TEST(RimeUserDbManualOrderTest, ResetManualClearsPositionKeepsLearning) {
+  using RankDb = UserDbWrapper<LevelDb>;
+  RankDb db(path{"manual_reset_manual.userdb"}, "manual_reset_manual");
+  if (db.Exists()) {
+    ASSERT_TRUE(db.Remove());
+  }
+  ASSERT_TRUE(db.Open());
+  ASSERT_TRUE(db.Update("ni \t泥", "3,1,10,2,7"));
+  ASSERT_TRUE(db.MetaUpdate("/manual_clock", "7"));
+  EXPECT_TRUE(user_manual_order::ResetManual(&db, "ni ", "泥"));
+  string value;
+  ASSERT_TRUE(db.Fetch("ni \t泥", &value));
+  UserDbState state;
+  ASSERT_TRUE(state.Unpack(value));
+  EXPECT_EQ(state.position, 0);
+  EXPECT_GT(state.manual_stamp, 7u);
+  EXPECT_EQ(state.commits, 3);
+  EXPECT_EQ(state.last_tick, 10u);
+  string clock_raw;
+  ASSERT_TRUE(db.MetaFetch("/manual_clock", &clock_raw));
+  uint64_t clock_value = 0;
+  ASSERT_TRUE(manual_stamp_codec::Parse(clock_raw, &clock_value));
+  EXPECT_GT(clock_value, 7u);
+  EXPECT_FALSE(user_manual_order::ResetManual(&db, "zz ", "无"));
+  string missing;
+  EXPECT_FALSE(db.Fetch("zz \t无", &missing));
+  ASSERT_TRUE(db.Close());
+  ASSERT_TRUE(db.Remove());
+}
+
+// F8：可见邻居模式下，第三词钉住目标位必须拒绝且零改动；
+// 可见邻居恰为占用者时合法交换，双方共用同一版本。
+TEST(RimeUserDbManualOrderTest, VisibleNeighborMustMatchOccupantExactly) {
+  using RankDb = UserDbWrapper<LevelDb>;
+  RankDb db(path{"manual_visible_neighbor.userdb"}, "manual_visible_neighbor");
+  if (db.Exists()) {
+    ASSERT_TRUE(db.Remove());
+  }
+  ASSERT_TRUE(db.Open());
+  ASSERT_TRUE(db.Update("ni \t泥", "3,1,10,3,1"));
+  ASSERT_TRUE(db.Update("ni \t你", "1,2,11,2,2"));
+  ASSERT_TRUE(db.Update("ni3 \t尼", "5,2,12,0,0"));
+  ASSERT_TRUE(db.MetaUpdate("/manual_clock", "9"));
+  // 可见邻居（不同码的尼）不是目标位占用者（同码的你）→ 拒绝。
+  EXPECT_FALSE(user_manual_order::MoveAdjacent(&db, "ni ", "泥", "ni3 ", "尼",
+                                               3, -1, true));
+  string value;
+  ASSERT_TRUE(db.Fetch("ni \t泥", &value));
+  EXPECT_EQ(value, "3,1,10,3,1");
+  ASSERT_TRUE(db.Fetch("ni \t你", &value));
+  EXPECT_EQ(value, "1,2,11,2,2");
+  ASSERT_TRUE(db.Fetch("ni3 \t尼", &value));
+  EXPECT_EQ(value, "5,2,12,0,0");
+  string clock;
+  ASSERT_TRUE(db.MetaFetch("/manual_clock", &clock));
+  EXPECT_EQ(clock, "9");
+  // 对照：可见邻居恰好占据目标位 → 合法交换，同版本落盘。
+  EXPECT_TRUE(user_manual_order::MoveAdjacent(&db, "ni ", "泥", "ni ", "你", 3,
+                                              -1, true));
+  string first, second;
+  ASSERT_TRUE(db.Fetch("ni \t泥", &first));
+  ASSERT_TRUE(db.Fetch("ni \t你", &second));
+  UserDbState a, b;
+  ASSERT_TRUE(a.Unpack(first));
+  ASSERT_TRUE(b.Unpack(second));
+  EXPECT_EQ(a.position, 2);
+  EXPECT_EQ(b.position, 3);
+  EXPECT_GT(a.manual_stamp, 9u);
+  EXPECT_EQ(a.manual_stamp, b.manual_stamp);
+  ASSERT_TRUE(db.Close());
+  ASSERT_TRUE(db.Remove());
+}
+
+// F9：参数护栏——非法参数直接拒绝，无任何落盘副作用。
+TEST(RimeUserDbManualOrderTest, MoveAdjacentRejectsInvalidArguments) {
+  using RankDb = UserDbWrapper<LevelDb>;
+  RankDb db(path{"manual_move_guard.userdb"}, "manual_move_guard");
+  if (db.Exists()) {
+    ASSERT_TRUE(db.Remove());
+  }
+  ASSERT_TRUE(db.Open());
+  ASSERT_TRUE(db.Update("ni \t泥", "3,1,10,3,1"));
+  ASSERT_TRUE(db.MetaUpdate("/manual_clock", "4"));
+  EXPECT_FALSE(
+      user_manual_order::MoveAdjacent(&db, "ni ", "泥", "", "", 0, -1));
+  EXPECT_FALSE(
+      user_manual_order::MoveAdjacent(&db, "ni ", "泥", "", "", 1, -1));
+  EXPECT_FALSE(user_manual_order::MoveAdjacent(&db, "ni ", "泥", "", "", 3, 0));
+  string value;
+  ASSERT_TRUE(db.Fetch("ni \t泥", &value));
+  EXPECT_EQ(value, "3,1,10,3,1");
+  string clock;
+  ASSERT_TRUE(db.MetaFetch("/manual_clock", &clock));
+  EXPECT_EQ(clock, "4");
+  ASSERT_TRUE(db.Close());
+  ASSERT_TRUE(db.Remove());
+}
