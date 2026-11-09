@@ -4,8 +4,10 @@
 #include <gtest/gtest.h>
 #include <filesystem>
 #include <fstream>
+#include <random>
 #include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 #include <rime/dict/rewrite_pack.h>
 #include <rime/dict/rewrite_store.h>
@@ -507,5 +509,202 @@ TEST(RimeRewritePackTest, CorruptedStagePayloadRejectedOnOpenStage) {
   bytes[192] = static_cast<char>(bytes[192] ^ 0xFF);  // 破坏载荷 magic
   WriteFileBytes(file, bytes);
   EXPECT_FALSE(store->OpenStage(s1));
+  std::filesystem::remove(file);
+}
+
+// ===== 句子级转换（T1-T8，登记见 doc/rewrite-pack-failmodes.md）=====
+
+namespace {
+
+// T 组固定 stage："a" 多值（句中取首值甲）、"ab"/"abc" 短语（贪心最长）、
+// "x" 恒等替换、"界" 多字节键。
+an<const RewritePack> OpenSentencePack(const path& file) {
+  std::error_code ec;
+  std::filesystem::remove(file, ec);
+  const RewriteStageId s1 = TestId(7);
+  {
+    RewriteStoreWriter starter(file);
+    if (!starter.BeginWorkspace()) {
+      return nullptr;
+    }
+  }
+  RewriteStoreWriter writer(file);
+  if (!writer.Open()) {
+    return nullptr;
+  }
+  RewriteStageData stage;
+  const char* rows[][3] = {{"a", "甲", ""},  {"a", "乙", ""},
+                           {"ab", "AB", ""}, {"abc", "ABC", ""},
+                           {"x", "x", ""},   {"界", "界界", ""}};
+  for (const auto& row : rows) {
+    stage.entries.push_back({row[0], row[1], row[2]});
+  }
+  if (!writer.AppendStage(s1, stage)) {
+    return nullptr;
+  }
+  vector<RewriteStageBinding> bindings;
+  bindings.push_back({"sect", {s1}});
+  if (!writer.CommitSchema("schemaA", bindings) || !writer.CommitWorkspace()) {
+    return nullptr;
+  }
+  auto store = RewriteStore::OpenCached(file);
+  if (!store) {
+    return nullptr;
+  }
+  vector<RewriteStageId> ids;
+  if (!store->FindStageSequence("schemaA", "sect", &ids) || ids.size() != 1) {
+    return nullptr;
+  }
+  return store->OpenStage(ids[0]);
+}
+
+}  // namespace
+
+// T1：贪心最长短语压制单字回退。
+TEST(RimeRewritePackTest, GreedyLongestPhraseBeatsSingleChar) {
+  const path file = TestPath("sent_greedy");
+  auto pack = OpenSentencePack(file);
+  ASSERT_TRUE(pack);
+  string result;
+  ASSERT_TRUE(pack->ConvertSentence("abc", &result));
+  EXPECT_EQ("ABC", result);
+  ASSERT_TRUE(pack->ConvertSentence("abcd", &result));
+  EXPECT_EQ("ABCd", result);
+  pack.reset();
+  std::filesystem::remove(file);
+}
+
+// T2：短语探针失败回退单字；探针命中后未匹配尾原样保留。
+TEST(RimeRewritePackTest, PhraseMissFallsBackToSingleChar) {
+  const path file = TestPath("sent_fallback");
+  auto pack = OpenSentencePack(file);
+  ASSERT_TRUE(pack);
+  string result;
+  ASSERT_TRUE(pack->ConvertSentence("axb", &result));
+  EXPECT_EQ("甲xb", result);
+  ASSERT_FALSE(pack->ConvertSentence("xb", &result));  // x 恒等 + b 未匹配
+  EXPECT_EQ("xb", result);
+  pack.reset();
+  std::filesystem::remove(file);
+}
+
+// T3：多值键句中转换取首值。
+TEST(RimeRewritePackTest, SentenceUsesFirstValue) {
+  const path file = TestPath("sent_first");
+  auto pack = OpenSentencePack(file);
+  ASSERT_TRUE(pack);
+  string result;
+  ASSERT_TRUE(pack->ConvertSentence("a", &result));
+  EXPECT_EQ("甲", result);
+  vector<string> values;
+  ASSERT_TRUE(pack->Lookup("a", &values));
+  ASSERT_EQ(2u, values.size());  // Lookup 仍给全部候选，句子只取第一个
+  pack.reset();
+  std::filesystem::remove(file);
+}
+
+// T4：恒等替换不计 changed。
+TEST(RimeRewritePackTest, IdentityReplacementNotChanged) {
+  const path file = TestPath("sent_identity");
+  auto pack = OpenSentencePack(file);
+  ASSERT_TRUE(pack);
+  string result;
+  EXPECT_FALSE(pack->ConvertSentence("x", &result));
+  EXPECT_EQ("x", result);
+  EXPECT_FALSE(pack->ConvertSentence("qxq", &result));
+  EXPECT_EQ("qxq", result);
+  ASSERT_TRUE(pack->ConvertSentence("ax", &result));  // a 变化 -> 整句 true
+  EXPECT_EQ("甲x", result);
+  pack.reset();
+  std::filesystem::remove(file);
+}
+
+// T5：不可匹配段原样保留（含多字节键替换、纯未匹配段）。
+TEST(RimeRewritePackTest, UnmatchableRunsVerbatimUtf8) {
+  const path file = TestPath("sent_verbatim");
+  auto pack = OpenSentencePack(file);
+  ASSERT_TRUE(pack);
+  string result;
+  ASSERT_TRUE(pack->ConvertSentence("q界r", &result));
+  EXPECT_EQ("q界界r", result);
+  EXPECT_FALSE(pack->ConvertSentence("qwr", &result));
+  EXPECT_EQ("qwr", result);
+  pack.reset();
+  std::filesystem::remove(file);
+}
+
+// T7：append-sensitive 续探——"a" 停在输入末尾，追加后从断点续探得最长匹配。
+TEST(RimeRewritePackTest, FrontierContinuationResolvesAppend) {
+  const path file = TestPath("sent_frontier");
+  auto pack = OpenSentencePack(file);
+  ASSERT_TRUE(pack);
+  RewriteSentenceState state;
+  string one_shot;
+  ASSERT_TRUE(pack->ConvertSentenceIncremental("a", &state));
+  EXPECT_EQ("甲", state.output);  // 单字回退（短语未决）
+  ASSERT_TRUE(pack->ConvertSentenceIncremental("ab", &state));
+  EXPECT_EQ("AB", state.output);  // 续探命中最长
+  ASSERT_TRUE(pack->ConvertSentenceIncremental("abc", &state));
+  EXPECT_EQ("ABC", state.output);
+  ASSERT_TRUE(pack->ConvertSentence("abc", &one_shot));
+  EXPECT_EQ(one_shot, state.output);
+  pack.reset();
+  std::filesystem::remove(file);
+}
+
+// T8：相同输入快速路径命中且结果稳定。
+TEST(RimeRewritePackTest, IdenticalInputUsesCache) {
+  const path file = TestPath("sent_identical");
+  auto pack = OpenSentencePack(file);
+  ASSERT_TRUE(pack);
+  RewriteSentenceState state;
+  RewriteSentenceMetrics metrics;
+  ASSERT_TRUE(pack->ConvertSentenceIncremental("abc", &state, &metrics));
+  EXPECT_EQ("ABC", state.output);
+  const bool again = pack->ConvertSentenceIncremental("abc", &state, &metrics);
+  EXPECT_EQ(2u, metrics.calls);
+  EXPECT_EQ(1u, metrics.identical_input_hits);
+  EXPECT_TRUE(again);
+  EXPECT_EQ("ABC", state.output);
+  pack.reset();
+  std::filesystem::remove(file);
+}
+
+// T6：增量 == 一次性（固定种子随机序列对拍；追加与截断编辑混合）。
+TEST(RimeRewritePackTest, IncrementalMatchesOneShot) {
+  const path file = TestPath("sent_equiv");
+  auto pack = OpenSentencePack(file);
+  ASSERT_TRUE(pack);
+  std::mt19937 rng(20261110);
+  const char* units[] = {"a", "b", "c", "x", "界", "q"};
+  RewriteSentenceState state;
+  RewriteSentenceMetrics metrics;
+  vector<string> text_units;
+  size_t prefix_reuse_seen = 0;
+  for (int step = 0; step < 200; ++step) {
+    if (!text_units.empty() && (rng() % 3) == 0) {
+      // 编辑：随机截断到某个字符边界
+      const size_t keep = rng() % (text_units.size() + 1);
+      text_units.resize(keep);
+    } else {
+      const size_t append = 1 + rng() % 3;
+      for (size_t i = 0; i < append; ++i) {
+        text_units.push_back(units[rng() % 6]);
+      }
+    }
+    string text;
+    for (const auto& unit : text_units) {
+      text += unit;
+    }
+    SCOPED_TRACE(::testing::Message() << "step=" << step << " text=" << text);
+    string one_shot;
+    const bool one_changed = pack->ConvertSentence(text, &one_shot);
+    const bool inc_changed =
+        pack->ConvertSentenceIncremental(text, &state, &metrics);
+    EXPECT_EQ(one_changed, inc_changed);
+    EXPECT_EQ(one_shot, state.output);
+  }
+  EXPECT_GT(metrics.prefix_reuse_calls, 0u);  // 复用路径确实被踩过
+  pack.reset();
   std::filesystem::remove(file);
 }

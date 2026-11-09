@@ -58,6 +58,29 @@ CommitWorkspace 恒 false 且注册表条目滞留（按协议以 AbortWorkspace
 - **FindStageSequence 对不存在 schema/section 的负路径**：S1 已含一例（schemaB miss），
   不逐组合展开。
 
+## 句子级转换（T 组，运行时热路径）
+
+契约（读码定）：贪心最长短语匹配压制单字回退（同首字时短语优先）；短语探针失败回退单字；
+多值键句中只取首值；value==源文本 的恒等替换不计 changed；不可匹配段按 UTF-8 标量
+整段原样保留；探针停在输入末尾（可能被后续追加延长）为 append-sensitive——决策不缓存、
+由 frontier 记录续探点，纯追加时从断点续探；**增量转换必须与一次性转换逐字节等价**
+（对拍 oracle）。测试挂 `test/rewrite_store_test.cc` 的 RimeRewritePackTest。
+
+| 编号 | 类别 | 机制（会怎么坏） | 观察 | 用例 |
+|---|---|---|---|---|
+| T1 | 自身 bug | 贪心失效：短语键被单字回退拆碎 | "abc"→"ABC" 而非 "甲b"+"c" 类碎片 | GreedyLongestPhraseBeatsSingleChar |
+| T2 | 自身 bug | 短语探针失败后不回退单字/不原样续扫 | "axb"→"甲xb" | PhraseMissFallsBackToSingleChar |
+| T3 | 自身 bug | 句中转换不取首值 | 多值键 "a" 句中取甲 | SentenceUsesFirstValue |
+| T4 | 自身 bug | 恒等替换误报 changed（假变化→多余重绘） | "x"→"x" 返回 false | IdentityReplacementNotChanged |
+| T5 | 自身 bug | 不可匹配段丢失/UTF-8 多字节截断 | "q界r"→"q界界r"；"qwr" 原样且 false | UnmatchableRunsVerbatimUtf8 |
+| T6 | 自身 bug | 增量与一次性不等价（前缀复用错位/frontier 状态错） | 固定种子 200 步随机序列对拍 | IncrementalMatchesOneShot |
+| T7 | 自身 bug | append-sensitive 续探丢匹配/重复消费 | "a"→"ab" 续探得 AB | FrontierContinuationResolvesAppend |
+| T8 | 自身 bug | 相同输入快速路径失效 | identical_input_hits 递增且结果稳定 | IdenticalInputUsesCache |
+
+句子组变异（W1–W5）：W1→T1（去短语优先分支）、W2→T4（恒等判断恒真）、
+W3→T6（去增量 output 截断——前缀复用错位）、W4→T8（去相同输入快路径）、
+W5→T5（changed 后丢弃不可匹配段）。
+
 ## 变异点（红绿对拍用）
 
 | 变异 | 位置 | 期望变红 |
@@ -68,3 +91,8 @@ CommitWorkspace 恒 false 且注册表条目滞留（按协议以 AbortWorkspace
 | V4 | rewrite_store.cc AppendStage：去掉 HasStage 幂等短路 | S3 |
 | V5 | rewrite_store.cc Writer::Open：去掉未提交尾巴截断 | S5 |
 | V6 | rewrite_pack.cc BuildRewritePack：注入递增计数器字节 | P2 |
+| W1 | rewrite_pack.cc ConvertSentence：去掉短语优先分支 | T1 |
+| W2 | rewrite_pack.cc ConvertSentence：replacement_changed 恒置 true | T4 |
+| W3 | rewrite_pack.cc ConvertSentenceIncremental：去掉 output.resize(output_end) | T6 |
+| W4 | rewrite_pack.cc ConvertSentenceIncremental：去掉相同输入快速路径 | T8 |
+| W5 | rewrite_pack.cc ConvertSentence：changed 后丢弃不可匹配段 | T5 |
