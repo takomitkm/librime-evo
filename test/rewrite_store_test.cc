@@ -316,7 +316,8 @@ TEST(RimeRewriteStoreTest,
   std::filesystem::remove(file);
 }
 
-// S8：索引字节损坏必须被拒收（干净失败，不崩溃）。
+// S8：索引字节损坏必须被拒收（干净失败，不崩溃）。导出面只有 OpenCached，
+// 内部 Open 的失败路径经它触达。
 TEST(RimeRewriteStoreTest, CorruptIndexRejectedAndOpenFailsCleanly) {
   const path file = TestPath("corrupt");
   std::filesystem::remove(file);
@@ -327,8 +328,6 @@ TEST(RimeRewriteStoreTest, CorruptIndexRejectedAndOpenFailsCleanly) {
   bytes.back() = static_cast<char>(bytes.back() ^ 0xFF);  // 索引位于文件末尾
   WriteFileBytes(file, bytes);
   EXPECT_FALSE(RewriteStore::OpenCached(file));
-  RewriteStore direct(file);
-  EXPECT_FALSE(direct.Open());
   std::filesystem::remove(file);
 }
 
