@@ -62,3 +62,27 @@
 | Y5 | rewriter.cc Transform：去掉 excluded_types 检查 | R5 |
 | Y6 | rewriter.cc Rewrite：多级串联只跑第一级 | R8 |
 | Y7 | rewriter.cc ReleaseStagesForDeployment：不清 runtime_state_ | R9 |
+| Y8 | rewriter.cc Apply：store 缺失时返回空翻译（吞掉翻译） | R6 |
+| Y9 | rewriter.cc CandidateType：忽略 candidate_type 覆盖 | R7 |
+| Y10 | filter_commons.cc TagMatching::TagsMatch：恒 true | R11 |
+| Y2b | rewriter.cc Transform：replace 模式未命中直接丢候选 | R2 |
+
+## 红绿闭环记录（校机 WIN11-HV1，mingw64）
+
+基线 338/338 绿（327 + 本组 11）→
+
+| 轮次 | 变异 | 红 |
+|---|---|---|
+| A | Y4 + Y5 + Y3 | R4、R5、R3（各自精确，零波及） |
+| B | Y2 + Y6 + Y7 | R8、R9（**Y2 未产生红**，见下） |
+| C | Y1 | R1 + R4/R5/R8/R9/R10（derive 顺序契约被破坏，全部依赖「原候选在前」的断言同红） |
+| D | Y2b | R2 |
+| E | Y8 + Y9 + Y10 | R6、R7、R11（各自精确） |
+
+还原后 338/338 复绿。11 个用例各自至少红过一次。
+
+**Y2 为何不红（重要发现）**：`Transform` 里「replace 模式且 result 为空则回退原候选」
+这条分支，在当前 pack 构建约束下**不可达**——空的 value 在编译期就被 `BuildBuckets`
+丢弃，而未命中时 `Rewrite()` 直接返回 false、`Transform` 随即返回 false，
+顶层由 `PrefetchTranslation` 保留原候选。所以该分支是防御性代码。真正要防的失效
+（未命中把候选弄丢）由 Y2b 覆盖，R2 由此变红。
