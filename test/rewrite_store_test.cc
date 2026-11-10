@@ -39,12 +39,14 @@ RewriteStageId TestId(std::uint64_t n) {
   return RewriteStageId{1, n};
 }
 
-int CountTemporaryFiles() {
+// 只数本用例目标文件派生的临时文件，避免被同目录下其它用例/残留污染。
+int CountTemporaryFiles(const path& target) {
+  const string prefix = target.filename().string() + ".tmp.";
   int count = 0;
   std::error_code ec;
   for (const auto& item : std::filesystem::directory_iterator(".", ec)) {
     const string name = item.path().filename().string();
-    if (name.find(".tmp.") != string::npos) {
+    if (name.compare(0, prefix.size(), prefix) == 0) {
       ++count;
     }
   }
@@ -150,7 +152,7 @@ TEST(RimeRewriteStoreTest,
     writer.MarkWorkspaceFailed();
     EXPECT_TRUE(writer.WorkspaceFailed());
     EXPECT_FALSE(writer.CommitWorkspace());
-    EXPECT_EQ(0, CountTemporaryFiles());
+    EXPECT_EQ(0, CountTemporaryFiles(file));
     ASSERT_TRUE(writer.AbortWorkspace());
   }
   EXPECT_EQ(committed, FileSize(file));

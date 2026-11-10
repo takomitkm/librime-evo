@@ -118,7 +118,18 @@ fsync + 原子改名，然后在新文件上补写一个镜像超块。压缩后
 | X1 | rewrite_store.cc ShouldCompact：去掉 dead_stages>=16 条件 | G2 |
 | X2 | rewrite_store.cc ShouldCompact：去掉垃圾量/比例条件 | G3 |
 | X3 | rewrite_store.cc CompactStoreFile：跳过 InstallAtomically | G2、G3 |
+| X4 | rewrite_store.cc ShouldCompact：恒返回 true（永远压缩） | G1（波及 S2/S6/S7：破坏「干净提交零写入」「死数据仍可读」「未达阈值不重写」三条契约） |
 
 红绿闭环记录（校机 WIN11-HV1，msvc-free mingw64）：基线 324/324 →
 W1–W5 单轮 7 红（5 绑定 + 2 波及）→ W6 单轮 4 红（1 绑定 + 3 波及）→
 还原 324/324 复绿。八个 T 用例各自至少红过一次（T2/T6/T7 由波及提供红）。
+
+压缩组红绿闭环：基线 327/327 → X1 单轮仅 G2 红（G3 绿，证明两条件互相独立）→
+X2 单轮仅 G3 红（G2 绿）→ X3 单轮 G2+G3 同红 → X4 单轮 G1 红（+S2/S6/S7 波及）→
+还原 327/327 复绿。三个 G 用例各自至少红过一次。
+
+**测试隔离教训（实测踩到）**：辅助函数 `CountTemporaryFiles` 起初扫描整个工作目录的
+`*.tmp.*`，被变异轮留下的两个 `compact_*.rwp.tmp.<uuid>` 残留污染，导致干净代码上
+S2 假红（期望 0、实际 2）。已改为只统计「本用例目标文件名 + `.tmp.`」前缀。教训：
+临时文件/产物类断言必须按目标文件名取域，不能扫目录；变异轮中断也会留下残留，
+红绿脚本应在每轮前后清理。
