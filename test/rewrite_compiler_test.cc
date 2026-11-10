@@ -196,17 +196,14 @@ TEST_F(RimeRewriteCompilerTest, FilesAndPresetMutuallyExclusive) {
 // D5：/preset 不得与 /key_xlit 组合（preset 本身有效，失败只能来自互斥检查）。
 TEST_F(RimeRewriteCompilerTest, PresetWithKeyXlitRejected) {
   const path preset_dir = shared_data_ / "rewriter";
-  WriteTextFile(preset_dir / "p1.txt", "a	X
-");
+  WriteTextFile(preset_dir / "p1.txt", "a\tX\n");
   WriteTextFile(preset_dir / "presets.yaml",
-                "version: 1
-presets:
-  demo: [s1]
-"
-                "stages:
-  s1:
-    files: [p1.txt]
-");
+                "version: 1\n"
+                "presets:\n"
+                "  demo: [s1]\n"
+                "stages:\n"
+                "  s1:\n"
+                "    files: [p1.txt]\n");
   auto config = MakeConfig({"rewriter"}, {}, "a>b", "demo");
   EXPECT_FALSE(Compile(config.get()));
 }
