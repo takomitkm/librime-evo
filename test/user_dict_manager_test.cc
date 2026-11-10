@@ -125,16 +125,22 @@ TEST_F(RimeUserDictManagerTest, DiscoveryListsAndSorts) {
 }
 
 // U2：发现跳过非法名（点前缀），空库目录触发 incomplete 但不吞合法项。
+// 点前缀库用"内容合法的库"构造，让断言只落在点前缀过滤这一层。
 TEST_F(RimeUserDictManagerTest, DiscoverySkipsInvalidAndReportsIncomplete) {
   CreateDb("udm_valid", {{"ni \t你", "1,1,1,0,0"}}, 5);
-  std::filesystem::create_directories(".udm_hidden.userdb");
+  CreateDb(".udm_hidden", {{"ni \t你", "1,1,1,0,0"}}, 5);
   std::filesystem::create_directories("udm_junk.userdb");
   UserDictList names;
   EXPECT_FALSE(manager_->GetUserDictList(&names));  // 空库 → incomplete
   EXPECT_TRUE(Contains(names, "udm_valid"));
   EXPECT_FALSE(Contains(names, "udm_junk"));     // 空库不列入
   EXPECT_FALSE(Contains(names, ".udm_hidden"));  // 点前缀忽略
-  std::filesystem::remove_all(".udm_hidden.userdb");
+  {
+    the<Db> db(component_->Create(".udm_hidden"));
+    if (db && db->Exists()) {
+      db->Remove();
+    }
+  }
 }
 
 // U3：快照写入 sync/<device>/，设备号变化时更新归属。
@@ -176,25 +182,34 @@ TEST_F(RimeUserDictManagerTest, RestoreMergesByMaxCommits) {
 }
 
 // U5：不属于本地任何库的快照被拒绝。
+// 用"另一台设备的真快照"构造：内容合法、命名规范，唯一拦它的是
+// 归属检查（名字不在本地库清单）→ 内层文件名匹配 → staging 库名三层。
 TEST_F(RimeUserDictManagerTest, RestoreRejectsForeignSnapshot) {
   CreateDb("udm_test", {{"ni \t你", "1,1,1,0,0"}}, 5);
-  const path bogus = sync_ / "bogus.userdb.tsv";
+  CreateDb("udm_other", {{"ni \t你", "2,1,2,0,0"}}, 6);
+  ASSERT_TRUE(manager_->Backup("udm_other"));
+  const path foreign = sync_ / "testdevice" / "udm_other.userdb.tsv";
+  // 删掉 udm_other 本体：此刻该快照不归属任何本地库。
   {
-    std::ofstream out(static_cast<const std::filesystem::path&>(bogus));
-    out << "# not a real snapshot\n";
+    the<Db> db(component_->Create("udm_other"));
+    ASSERT_TRUE(db && db->Exists());
+    ASSERT_TRUE(db->Remove());
   }
-  EXPECT_FALSE(manager_->Restore(bogus));
+  EXPECT_FALSE(manager_->Restore(foreign));
 }
 
 // U6：sync 根之外的快照（路径逃逸）被拒绝。
+// 用真快照放到 sync 根外（文件名与库匹配），排除内容/命名因素，
+// 让断言只落在 sync 根 containment 这一层守卫上。
 TEST_F(RimeUserDictManagerTest, RestoreRejectsTraversal) {
   CreateDb("udm_test", {{"ni \t你", "1,1,1,0,0"}}, 5);
-  const path outside = sync_ / ".." / "outside.userdb.tsv";
-  {
-    std::ofstream out(static_cast<const std::filesystem::path&>(outside));
-    out << "# outside sync root\n";
-  }
-  EXPECT_FALSE(manager_->Restore(path{"outside.userdb.tsv"}));
+  const path snapshot = sync_ / "testdevice" / "udm_test.userdb.tsv";
+  ASSERT_TRUE(manager_->Backup("udm_test"));
+  const path outside = path{"udm_test.userdb.tsv"};  // CWD，sync 根之外
+  std::filesystem::copy_file(
+      snapshot, outside, std::filesystem::copy_options::overwrite_existing);
+  EXPECT_FALSE(manager_->Restore(outside));
+  std::filesystem::remove(outside);
 }
 
 // U7：导入返回合并条数；对不存在的库返回 -1。

@@ -54,3 +54,22 @@
 | W5（本组） | user_dict_manager.cc RestoreMerge：ObserveClock/Tick 不调用（合并退化为覆盖） | U4、U7 |
 
 注：为避免与 rewrite_compiler 的 Z 组混淆，本组变异按 W 组续号。
+
+## 红绿闭环记录（校机 WIN11-HV1，mingw64）
+
+基线 360/360 绿（353 + 本组 7）→ W2→U3；W5→U4/U7；W1b（反转排序）→U1；
+W4c（去 sync 根 containment，配合"真快照放根外"的 U6 强化）→U6；
+W1c（去点前缀过滤，配合"点前缀合法库"的 U2 强化）→U2；
+W3c（三点：归属循环+内层文件名+staging 库名）→U5。还原后 360/360 复绿。
+7 个用例各自至少红过一次。
+
+**测试设计要点（实测踩到）**：
+- 全局 userdb 组件的 resolver 根在**注册时**钉死（rime_test_main traits 的 "."），
+  夹具必须把 deployer.user_data_dir 也指向 CWD 对齐，否则 manager 扫描目录与
+  组件读写路径分家（Backup 直接失败）。
+- 元数据键约定：`MetaUpdate("/user_id")` 内部再补一层 `/`，读必须走
+  `MetaFetch`，裸 `Fetch("/user_id")` 查的是 `/user_id`（少一层）→ 恒空。
+- `CreateMetadata` 只写键不建库，必须先 `Open`。
+- **多层守卫规律（D6/D7/U5/U6 一致）**：安全类契约（路径逃逸、外来快照）都有
+  2-4 层独立守卫，单点变异必被相邻层兜住。测这类契约要先把测试输入"净化"
+  （真快照、合法名），让断言只落在目标守卫层，再按层数做组合变异。
