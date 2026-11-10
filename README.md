@@ -1,172 +1,93 @@
-# librime-evo
+# librime-evo 测试问题清单
 
-> **Fork notice**
->
-> This repository is a personal fork of [rime/librime](https://github.com/rime/librime),
-> whose upstream is [rime/librime](https://github.com/rime/librime).
->
-> It is **not** the official Rime project. For the canonical source, releases and
-> documentation, please refer to [rime/librime](https://github.com/rime/librime) and
-> [rime.im](https://rime.im).
->
-> This fork is maintained independently. Changes relative to upstream are listed in
-> [Changes from upstream](#changes-from-upstream). Bug reports about unmodified
-> upstream behavior should go to the upstream project.
+上游：[rime/librime](https://github.com/rime/librime)（正主）·
+[amzxyz/librime-evo](https://github.com/amzxyz/librime-evo)（本仓库的来源）。
+本分支 `test/manual-order-contracts` 是测试分支；每条失效模式的完整登记与
+变异归因在 `doc/*-failmodes.md`。
 
-[![Build status](https://github.com/amzxyz/librime-evo/actions/workflows/commit-ci.yml/badge.svg)](https://github.com/amzxyz/librime-evo/actions/workflows/commit-ci.yml)
-[![GitHub release](https://img.shields.io/github/release/amzxyz/librime-evo.svg)](https://github.com/amzxyz/librime-evo/releases)
-[![License](https://img.shields.io/badge/License-BSD%203--Clause-blue.svg)](https://opensource.org/licenses/BSD-3-Clause)
-
-RIME: Rime Input Method Engine
-===
-
-Rime with your keystrokes.
-
-Project home
 ---
-Upstream: [rime.im](https://rime.im)  
-This fork: [github.com/amzxyz/librime-evo](https://github.com/amzxyz/librime-evo)
 
-Changes from upstream
----
-This fork is based on [rime/librime](https://github.com/rime/librime).
-The following is a non-exhaustive list of local changes:
+## 一、API 锐边（建议上游收紧）
 
-- [ ] TODO: 增加辅助码功能
-- [ ] TODO: 重构滤镜模块等
+### 1. RewriteStoreWriter 调用序陷阱：反序不报错，静默旁路事务
 
-Everything not listed here should be assumed to match upstream. When in doubt,
-compare against the upstream repository before reporting a bug.
+- 正确序：一次性 writer 只调 `BeginWorkspace()` 注册进程级事务 →
+  干活的 writer 用 `Open()` 加入后才进事务（`rewrite_compiler.cc` 的两步式）。
+- 反序（`Open()` 先于 `BeginWorkspace()`）：事务根本不挂上——
+  `CommitSchema` **静默直提**、`CommitWorkspace` **恒 false**、
+  注册表条目滞留并毒化同路径的后续操作（再 BeginWorkspace 报 already active）。
+- 生产代码用对了；任何新调用方都可能踩。建议：反序时显式报错，
+  或 `Open()` 顺带注册。
 
-License
----
-[The 3-Clause BSD License](https://opensource.org/licenses/BSD-3-Clause)
+### 2. CommitWorkspace 失败后必须 AbortWorkspace 解锁
 
-This fork retains the original copyright notices. See [LICENSE](LICENSE) for details.
+- 拒交（含 `MarkWorkspaceFailed` 之后）不清理注册表，同路径被锁死，
+  直到显式 `AbortWorkspace()`。生产侧失败分支是否每处都 Abort 未逐一核实。
 
-Features
-===
-  - A modular, extensible input method engine in cross-platform C++ code,
-    built on top of open-source technologies
-  - Covering features found in a large variety of Chinese input methods,
-    either shape-based or phonetic-based
-  - Rime input schema, a DSL in YAML syntax for fast trying out innovative ideas
-    of input method design
-  - Spelling Algebra, a mechanism to create variant spelling, especially useful
-    for Chinese dialects
-  - Support for chord-typing with a generic Qwerty keyboard
+### 3. 上游老用户库静默失效
 
-Install
-===
-Follow the instructions to build librime on platforms other than Linux:
-  - [macOS](https://github.com/rime/librime/tree/master/README-mac.md)
-  - [Windows](https://github.com/rime/librime/tree/master/README-windows.md)
+- evo 的五槽 CSV 值格式没有 legacy reader：上游 1.x 的三字段用户库
+  升级到 evo 后，学习数据（词频/时间戳）静默作废，无迁移提示、无告警。
 
-Build dependencies
----
-  - compiler with C++17 support
-  - cmake>=3.12
-  - libboost>=1.74
-  - libglog>=0.7 (optional)
-  - libleveldb
-  - libmarisa
-  - libyaml-cpp>=0.5
-  - libgtest (optional)
+## 二、设计契约（调用方必须知道，不是 bug）
 
-Runtime dependencies
----
-  - libboost
-  - libglog (optional)
-  - libleveldb
-  - libmarisa
-  - libyaml-cpp
+### 4. 一次性 ConvertSentence 是惰性拷贝
 
-Build and install on Linux
----
-```
-make
-sudo make install
-```
+- `changed == false` 时 `result` 保持为空串；增量路径 `state.output`
+  始终持有全文。拿两者对拍或做断言时必须按此归一化。
 
-Packaging status
----
-[![Packaging status](https://repology.org/badge/vertical-allrepos/librime.svg?columns=4&minversion=1.10.0)](https://repology.org/project/librime/versions)
+### 5. 句子级转换只取首值
 
-Frontends
-===
+- 同 key 多值（Lookup 给全部候选）在句中转换只取第一个值。
 
-Official:
-  - [ibus-rime](https://github.com/rime/ibus-rime): IBus frontend for Linux
-  - [Squirrel](https://github.com/rime/squirrel): frontend for macOS
-  - [Weasel](https://github.com/rime/weasel): frontend for Windows
+### 6. 惰性 GC：删方案后文件不会立即缩小
 
-<!-- Sort in alphabetical order with :sort in vim -->
-Community:
-  - [ARIF](https://www.nongnu.org/arif/): frontend for Readline
-  - [Hamster](https://github.com/imfuxiao/Hamster): frontend for iOS
-  - [My RIME](https://github.com/LibreService/my_rime): frontend for web
-  - [PIME](https://github.com/EasyIME/PIME): frontend for Windows
-  - [Trime](https://github.com/osfans/trime): frontend for Android
-  - [XIME](https://github.com/stackia/XIME): frontend for macOS
-  - [YuyanIme](https://github.com/gurecn/YuyanIme): frontend for Android
-  - [coc-rime](https://github.com/tonyfettes/coc-rime): frontend for Vim
-  - [emacs-rime](https://github.com/DogLooksGood/emacs-rime): frontend for Emacs
-  - [fcitx-rime](https://github.com/fcitx/fcitx-rime): Fcitx frontend for Linux
-  - [fcitx5-android](https://github.com/fcitx5-android/fcitx5-android): frontend for Android
-  - [fcitx5-macos](https://github.com/fcitx-contrib/fcitx5-macos): Fcitx5 frontend for macOS
-  - [fcitx5-rime](https://github.com/fcitx/fcitx5-rime): Fcitx5 frontend for Linux
-  - [fcitx5-ui.nvim](https://github.com/black-desk/fcitx5-ui.nvim): Fcitx5 frontend for Vim
-  - [fcitx5.nvim](https://github.com/tonyfettes/fcitx5.nvim): Fcitx5 frontend for Vim
-  - [pyrime](https://github.com/Freed-Wu/pyrime): frontend for Ptpython
-  - [rabbit](https://github.com/amorphobia/rabbit): frontend for Windows
-  - [rime.nvim](https://github.com/Freed-Wu/rime.nvim): frontend for Vim
-  - [rl_custom_rime](https://github.com/Freed-Wu/rl_custom_rime): frontend for Readline
-  - [tmux-rime](https://github.com/Freed-Wu/tmux-rime): frontend for Tmux
-  - [zsh-rime](https://github.com/Freed-Wu/zsh-rime): frontend for Zsh
+- `RetainSchemas` 只把死 schema 从索引解绑；stage 数据本体保留到
+  压缩阈值（死 stage ≥16，或垃圾 ≥4MB 且 ≥已提交大小 1/4）。
+  属设计（避免小部署反复重写），但用户观察"删了方案文件还那么大"时要知道这是刻意的。
 
-Plugins
-===
-  - [librime-charcode](https://github.com/rime/librime-charcode) (Deprecated) Module that
-    deals with character encoding; depends on boost::locale and ICU libraries
-  - [librime-legacy](https://github.com/rime/librime-legacy) (Deprecated) Legacy module with
-    GPL-licensed code
-  - [librime-lua](https://github.com/hchunhui/librime-lua) Lua scripting
-  - [librime-octagram](https://github.com/lotem/librime-octagram) Language model
-  - [librime-predict](https://github.com/rime/librime-predict) Predict next word
-  - [librime-proto](https://github.com/lotem/librime-proto) IPC using CapnProto
+### 7. replace 模式的空结果回退分支不可达
 
-Related works
-===
-  - [plum](https://github.com/rime/plum): Rime configuration (recipe) installer
-  - [combo-pinyin](https://github.com/rime/home/wiki/ComboPinyin): an innovative
-    chord-typing practice to input Pinyin
-  - [rime-essay](https://github.com/rime/rime-essay): the preset vocabulary
-  - [SCU](https://github.com/neolee/SCU): Squirrel Configuration Utilities
+- `if (mode == replace && result->empty())` 的回退在当前 pack 构建约束下
+  永远走不到：空 value 编译期就被 `BuildBuckets` 丢弃，未命中时
+  `Rewrite` 直接 false。防御性代码，动它前先看 `rewrite-pack-failmodes.md` 的 Y2 记录。
 
-Credits
-===
-We are grateful to the makers of the following open source libraries:
+## 三、测试基建教训（写测试的人看）
 
-  - [Boost C++ Libraries](http://www.boost.org/) (Boost Software License)
-  - [google-glog](https://github.com/google/glog) (The 3-Clause BSD License)
-  - [Google Test](https://github.com/google/googletest) (The 3-Clause BSD License)
-  - [LevelDB](https://github.com/google/leveldb) (The 3-Clause BSD License)
-  - [marisa-trie](https://github.com/s-yata/marisa-trie) (BSD 2-Clause License, LGPL 2.1)
-  - [yaml-cpp](https://github.com/jbeder/yaml-cpp) (MIT License)
+### 8. clang-format LINT_OK ≠ 能编译
 
-Contributors
-===
-  - [佛振](https://github.com/lotem)
-  - [鄒旭](https://github.com/zouxu09)
-  - [Weng Xuetian](http://csslayer.info)
-  - [Chongyu Zhu](http://lembacon.com)
-  - [Zhiwei Liu](https://github.com/liuzhiwei)
-  - [BYVoid](http://www.byvoid.com)
-  - [雪齋](https://github.com/LEOYoon-Tsaw)
-  - [瑾昀](https://github.com/kunki)
-  - [osfans](https://github.com/osfans)
-  - [jakwings](https://github.com/jakwings)
-  - [Prcuvu](https://github.com/Prcuvu)
-  - [hchunhui](https://github.com/hchunhui)
-  - [Qijia Liu](https://github.com/eagleoflqj)
-  - [WhiredPlanck](https://github.com/WhiredPlanck)
+- 它只查排版，字符串字面量断行也能过。含 `	`/`
+`/反引号转义的补丁
+  一律落 `.py` 文件或用编辑工具，不要内联 `python -c`（实测断行入库一次）。
+
+### 9. 产物类断言必须按目标文件名取域
+
+- 扫全工作目录数 `*.tmp.*` 会被其它用例或变异残留污染出假红（实测踩过）。
+  统计"本用例目标文件名 + 后缀"前缀；红绿脚本每轮前后清残留。
+
+### 10. 全局组件的 resolver 根在注册时钉死
+
+- userdb 组件的路径根 = 注册时的 `user_data_dir`（测试环境是 CWD）。
+  夹具要把 `deployer.user_data_dir` 指向同一处，否则 manager 扫描目录
+  与组件读写路径分家（Backup 直接失败）。
+
+### 11. 安全契约有多层守卫，测前先"净化输入"
+
+- 路径逃逸 2 层、缺失文件 4 层、外来快照 3 层独立守卫。
+  单点变异必被相邻层兜住——先把测试输入绕开无关层（真快照、合法名），
+  让断言单层化，再按层数做组合变异。"没见过红"先数守卫层数，再说测试无效。
+
+## 四、覆盖现状（全部经校机红绿闭环，每个用例见过红）
+
+| 切片 | 登记 | 用例 |
+|---|---|---|
+| 手排 + 编解码 | doc/manual-order-failmodes.md（C/F） | 15 |
+| rewrite store/pack 持久层 | doc/rewrite-pack-failmodes.md（S/P） | 10 |
+| 句子级转换 | doc/rewrite-pack-failmodes.md（T） | 8 |
+| 压缩阈值 | doc/rewrite-pack-failmodes.md（G） | 3 |
+| rewriter 运行时 | doc/rewriter-runtime-failmodes.md（R） | 11 |
+| 部署编译 | doc/rewrite-compiler-failmodes.md（D） | 15 |
+| 词典管理 | doc/user-dict-manager-failmodes.md（U） | 7 |
+
+明确排除（理由见各登记表）：故障注入三件套（OOM/掉电/IO，需注入基建）、
+多进程部署并发、Synchronize 多设备编排、16MiB 单行上限。
