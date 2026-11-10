@@ -68,3 +68,30 @@
 | Z8 | rewrite_compiler.cc ComputeStageId：不去重文件列表 | D11 |
 | Z9 | rewrite_compiler.cc Compile：无 section 时不提交空绑定 | D12 |
 | Z10 | rewrite_preset.cc Load：不校验 version | D14 |
+| Z5b/Z5c | 解析守卫层卸载（见下） | D7 |
+| Z11b/Z11c | 缺失文件守卫层卸载（见下） | D6 |
+| Z12 | rewrite_preset.cc Resolve：恒失败 | D13 |
+| Z13 | ParseFileLine：key/value 互换 | D1、D9？否——D10、D13、D15（正向链路共用条目写入） |
+| Z14 | ComputeStageId：注入递增计数器（指纹不确定化） | D2、D11 |
+| Z15 | LoadSourceFile：畸形行跳过而非失败 | D9 |
+
+## 红绿闭环记录（校机 WIN11-HV1，mingw64）
+
+基线 353/353 绿（338 + 本组 15）→ 变异轮次：Z1→D3；Z6→D8；Z7→D10；Z8→D11；
+Z9→D12；Z10→D14；Z3→D4；Z4→D5；Z5c→D7；Z12→D13；Z13→D1/D10/D13/D15；
+Z14→D2/D11；Z15→D9；Z11c→D6/D7。还原后 353/353 复绿。
+15 个用例各自至少红过一次。
+
+**两点纵深防御的实测发现**：
+
+1. **D7（路径逃逸）有两层独立守卫**——入口 `safe_path::ValidRelativeName` 与
+   解析 `safe_path::ExistingFile`（canonical 检查）。只卸任何一层，D7 仍绿；
+   必须两层同卸（Z5c）才红。测试有效，但单点变异无法证伪。
+2. **D6（缺失文件）有四层守卫**——`ValidRelativeName`、`ExistingFile`、
+   `ComputeStageId` 的 `file_size`/open 失败、`LoadSourceFile` 的 open 失败。
+   需要四点组合变异（Z11c）才打红。这类多层防护下，"未见过红"不等于测试无效，
+   而是说明单点失效被相邻守卫兜住——记录层数本身就是安全评估结论。
+
+**Z13 的归因修正**：swap key/value 并不会让 D9（畸形行）变红——无 TAB 的行
+交换后依然解析失败。D9 由 Z15（跳过畸形行）打红。教训：变异前先推演它对
+断言的实际影响，"期望变红"要写得出机理。
