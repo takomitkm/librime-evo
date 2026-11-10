@@ -80,9 +80,10 @@ state.output 始终持有全文——等价对拍须按此归一化。测试挂 
 | T7 | 自身 bug | append-sensitive 续探丢匹配/重复消费 | "a"→"ab" 续探得 AB | FrontierContinuationResolvesAppend |
 | T8 | 自身 bug | 相同输入快速路径失效 | identical_input_hits 递增且结果稳定 | IdenticalInputUsesCache |
 
-句子组变异（W1–W5）：W1→T1（去短语优先分支）、W2→T4（恒等判断恒真）、
-W3→T6（去增量 output 截断——前缀复用错位）、W4→T8（去相同输入快路径）、
-W5→T5（changed 后丢弃不可匹配段）。
+句子组变异（W1–W6，校机实测归因）：W1→T1；W2→T4（波及 T2：恒等恒真使 "xb" 报 changed）；
+W3→T7（波及 T6：去掉 output 截断使旧输出累积）；W4→T8（波及 T6）；W5→T5（波及 T6）；
+W6→T3（把句中取值从首值改成末值；波及 T2/T4/T7，三者都依赖 "a" 取首值）。
+T6 是等价对拍，任何语义漂移都会打红它——它没有"专属"变异，属设计使然。
 
 ## 变异点（红绿对拍用）
 
@@ -99,3 +100,8 @@ W5→T5（changed 后丢弃不可匹配段）。
 | W3 | rewrite_pack.cc ConvertSentenceIncremental：去掉 output.resize(output_end) | T6 |
 | W4 | rewrite_pack.cc ConvertSentenceIncremental：去掉相同输入快速路径 | T8 |
 | W5 | rewrite_pack.cc ConvertSentence：changed 后丢弃不可匹配段 | T5 |
+| W6 | rewrite_pack.cc GetFirstValue：句中改取末值 | T3 |
+
+红绿闭环记录（校机 WIN11-HV1，msvc-free mingw64）：基线 324/324 →
+W1–W5 单轮 7 红（5 绑定 + 2 波及）→ W6 单轮 4 红（1 绑定 + 3 波及）→
+还原 324/324 复绿。八个 T 用例各自至少红过一次（T2/T6/T7 由波及提供红）。
