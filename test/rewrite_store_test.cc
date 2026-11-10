@@ -714,3 +714,127 @@ TEST(RimeRewritePackTest, IncrementalMatchesOneShot) {
   pack.reset();
   std::filesystem::remove(file);
 }
+
+// ===== 压缩阈值（G1-G3，登记见 doc/rewrite-pack-failmodes.md）=====
+
+namespace {
+
+// 建 count 个 stage 全绑在 schemaA/sect 下，返回 id 列表。
+bool BuildStages(const path& file,
+                 int count,
+                 size_t value_bytes,
+                 vector<RewriteStageId>* ids) {
+  RewriteStoreWriter starter(file);
+  if (!starter.BeginWorkspace()) {
+    return false;
+  }
+  RewriteStoreWriter writer(file);
+  if (!writer.Open()) {
+    return false;
+  }
+  for (int i = 0; i < count; ++i) {
+    const RewriteStageId id = TestId(static_cast<uint64_t>(100 + i));
+    RewriteStageData stage;
+    stage.entries.push_back(
+        {"key" + std::to_string(i),
+         string(value_bytes, static_cast<char>('a' + i % 26)), ""});
+    if (!writer.AppendStage(id, stage)) {
+      return false;
+    }
+    ids->push_back(id);
+  }
+  vector<RewriteStageBinding> all;
+  all.push_back({"sect", *ids});
+  if (!writer.CommitSchema("schemaA", all)) {
+    return false;
+  }
+  return writer.CommitWorkspace();
+}
+
+// 重绑只留前 keep 个 stage，其余成为死 stage。
+bool DropStages(const path& file,
+                size_t keep,
+                const vector<RewriteStageId>& ids) {
+  RewriteStoreWriter starter(file);
+  if (!starter.BeginWorkspace()) {
+    return false;
+  }
+  RewriteStoreWriter writer(file);
+  if (!writer.Open()) {
+    return false;
+  }
+  vector<RewriteStageId> live(ids.begin(), ids.begin() + keep);
+  vector<RewriteStageBinding> fewer;
+  fewer.push_back({"sect", live});
+  if (!writer.CommitSchema("schemaA", fewer)) {
+    return false;
+  }
+  return writer.CommitWorkspace();
+}
+
+}  // namespace
+
+// G1：未达任何阈值时不得压缩——只追加索引，死数据保留。
+TEST(RimeRewriteStoreCompactionTest, CompactionStaysLazyBelowThreshold) {
+  const path file = TestPath("compact_lazy");
+  std::filesystem::remove(file);
+  vector<RewriteStageId> ids;
+  ASSERT_TRUE(BuildStages(file, 3, 64, &ids));
+  const auto before = FileSize(file);
+  ASSERT_TRUE(DropStages(file, 1, ids));  // 2 死 stage，垃圾仅百字节
+  const auto after = FileSize(file);
+  EXPECT_GE(after, before);  // 不收缩（只追加了一份索引）
+  auto store = RewriteStore::OpenCached(file);
+  ASSERT_TRUE(store);
+  EXPECT_EQ(2u, store->generation());
+  EXPECT_TRUE(store->OpenStage(ids[0]));
+  EXPECT_TRUE(store->OpenStage(ids[2]));  // 死 stage 仍在（惰性回收）
+  std::filesystem::remove(file);
+}
+
+// G2：死 stage 数达 16 → 物理压缩；死数据从索引消失、live 内容不变。
+TEST(RimeRewriteStoreCompactionTest, DeadStageThresholdTriggersCompaction) {
+  const path file = TestPath("compact_dead16");
+  std::filesystem::remove(file);
+  vector<RewriteStageId> ids;
+  ASSERT_TRUE(BuildStages(file, 17, 64, &ids));
+  const auto before = FileSize(file);
+  ASSERT_TRUE(DropStages(file, 1, ids));  // 16 死 stage
+  const auto after = FileSize(file);
+  EXPECT_LT(after, before);  // 物理回收
+  auto store = RewriteStore::OpenCached(file);
+  ASSERT_TRUE(store);
+  EXPECT_EQ(2u, store->generation());
+  auto live = store->OpenStage(ids[0]);
+  ASSERT_TRUE(live);
+  EXPECT_FALSE(store->OpenStage(ids[16]));  // 死 stage 已从索引消失
+  vector<string> values;
+  ASSERT_TRUE(live->Lookup("key0", &values));
+  ASSERT_EQ(1u, values.size());
+  EXPECT_EQ(string(64, 'a'), values[0]);  // live 内容逐字节保留
+  std::filesystem::remove(file);
+}
+
+// G3：死 stage 不足 16，但垃圾 ≥4MB 且 ≥已提交大小的 1/4 → 同样压缩。
+TEST(RimeRewriteStoreCompactionTest, GarbageRatioTriggersCompaction) {
+  const path file = TestPath("compact_garbage");
+  std::filesystem::remove(file);
+  constexpr size_t kBigValue = 320 * 1024;  // 16 个 stage ≈ 5MB
+  vector<RewriteStageId> ids;
+  ASSERT_TRUE(BuildStages(file, 16, kBigValue, &ids));
+  const auto before = FileSize(file);
+  ASSERT_TRUE(DropStages(file, 1, ids));  // 15 死 stage（不足 16）
+  const auto after = FileSize(file);
+  EXPECT_LT(after, before / 2);  // 垃圾占比触发压缩
+  auto store = RewriteStore::OpenCached(file);
+  ASSERT_TRUE(store);
+  EXPECT_TRUE(store->OpenStage(ids[0]));
+  EXPECT_FALSE(store->OpenStage(ids[15]));
+  vector<string> values;
+  auto live = store->OpenStage(ids[0]);
+  ASSERT_TRUE(live);
+  ASSERT_TRUE(live->Lookup("key0", &values));
+  ASSERT_EQ(1u, values.size());
+  EXPECT_EQ(string(kBigValue, 'a'), values[0]);
+  std::filesystem::remove(file);
+}

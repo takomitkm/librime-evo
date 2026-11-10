@@ -85,6 +85,20 @@ W3→T7（波及 T6：去掉 output 截断使旧输出累积）；W4→T8（波�
 W6→T3（把句中取值从首值改成末值；波及 T2/T4/T7，三者都依赖 "a" 取首值）。
 T6 是等价对拍，任何语义漂移都会打红它——它没有"专属"变异，属设计使然。
 
+## 压缩阈值（G 组）
+
+契约（读码定）：`ShouldCompact` 双条件——死 stage 数 ≥16，或垃圾字节 ≥4MB **且** ≥
+已提交大小的 1/4；两者皆不满足时只追加索引、死数据保留（惰性，见 S6）。
+`CompactStoreFile` 只复制 live stage（逐个复算 payload 哈希校验）、写临时文件 +
+fsync + 原子改名，然后在新文件上补写一个镜像超块。压缩后死 stage 从索引消失
+（OpenStage 返回空），live stage 内容逐字节保留，代际 +1。
+
+| 编号 | 类别 | 机制（会怎么坏） | 观察 | 用例 |
+|---|---|---|---|---|
+| G1 | 失控写入 | 未达阈值就压缩（抖动/白耗 I/O），或该压缩不压缩（文件无限膨胀） | 2 死 stage 小型 store 只增长不收缩，死 stage 仍可开 | CompactionStaysLazyBelowThreshold |
+| G2 | 失控写入（GC） | 死 stage 数达阈值不回收 → 死数据永久滞留 | 16 死 stage 后文件显著缩小、死 stage 从索引消失、live 内容不变、代际 +1 | DeadStageThresholdTriggersCompaction |
+| G3 | 失控写入（GC） | 只看死 stage 数、忽略垃圾比例条件 → 大 store 反复重写或永不回收 | 15 死 stage 但垃圾 ≥4MB 且 ≥1/4 → 收缩到不足一半 | GarbageRatioTriggersCompaction |
+
 ## 变异点（红绿对拍用）
 
 | 变异 | 位置 | 期望变红 |
@@ -101,6 +115,9 @@ T6 是等价对拍，任何语义漂移都会打红它——它没有"专属"变
 | W4 | rewrite_pack.cc ConvertSentenceIncremental：去掉相同输入快速路径 | T8 |
 | W5 | rewrite_pack.cc ConvertSentence：changed 后丢弃不可匹配段 | T5 |
 | W6 | rewrite_pack.cc GetFirstValue：句中改取末值 | T3 |
+| X1 | rewrite_store.cc ShouldCompact：去掉 dead_stages>=16 条件 | G2 |
+| X2 | rewrite_store.cc ShouldCompact：去掉垃圾量/比例条件 | G3 |
+| X3 | rewrite_store.cc CompactStoreFile：跳过 InstallAtomically | G2、G3 |
 
 红绿闭环记录（校机 WIN11-HV1，msvc-free mingw64）：基线 324/324 →
 W1–W5 单轮 7 红（5 绑定 + 2 波及）→ W6 单轮 4 红（1 绑定 + 3 波及）→
