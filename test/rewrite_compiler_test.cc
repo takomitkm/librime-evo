@@ -182,10 +182,14 @@ TEST_F(RimeRewriteCompilerTest, ContentChangeProducesNewStage) {
   EXPECT_EQ("ABD", values[0]);
 }
 
-// D4：/files 与 /preset 必须二选一。
+// D4：/files 与 /preset 必须二选一（两者同时设置时）；
+// 注意 MakeConfig 是 else-if，这里必须显式同时写入两个键。
 TEST_F(RimeRewriteCompilerTest, FilesAndPresetMutuallyExclusive) {
   WriteTextFile(user_data_ / "rw.txt", "abc\tABC\n");
-  auto config = MakeConfig({"rewriter"}, {"rw.txt"}, "", "demo");
+  the<Config> config(new Config);
+  config->SetItem("engine/filters", MakeList({"rewriter"}));
+  config->SetItem("rewriter/files", MakeList({"rw.txt"}));
+  config->SetString("rewriter/preset", "demo");
   EXPECT_FALSE(Compile(config.get()));
 }
 
