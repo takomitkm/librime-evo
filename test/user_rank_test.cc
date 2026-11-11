@@ -191,14 +191,18 @@ TEST_F(RimeUserRankTest, LearnedEntryBoostsAboveSystemTop) {
 }
 
 // J4：同码有手排时，学习词不再自动加成（手排优先让位）。
+// 学习词权重压到榜首之下：若无抑制（M9），会被加成到榜首+偏移，断言即红。
 TEST_F(RimeUserRankTest, PinnedCodeSuppressesAutoBoost) {
   auto dictionary = Open();
   ASSERT_TRUE(dictionary && dictionary->loaded());
   DictEntryIterator system = SystemEntries(dictionary.get(), "hao");
+  DictEntryIterator probe = SystemEntries(dictionary.get(), "hao");
+  const double system_top = probe.Peek()->weight;
 
   UserDictEntryIterator users;
-  users.Add(MakeUser("好", 1.0, 1, 7, SoloCode(1)));      // 手排
-  users.Add(MakeUser("好U", 1.0, 0, 0, SoloCode(1), 1));  // 学习过
+  users.Add(MakeUser("好", 1.0, 1, 7, SoloCode(1)));  // 手排
+  users.Add(MakeUser("好U", system_top - 1.0, 0, 0, SoloCode(1),
+                     1));  // 学习过，低于榜首
 
   user_rank::Apply(&system, &users, false);
   users.SortAll();
@@ -206,7 +210,8 @@ TEST_F(RimeUserRankTest, PinnedCodeSuppressesAutoBoost) {
   EXPECT_EQ("好", users.Peek()->text);  // 手排仍第一
   users.Next();
   ASSERT_FALSE(users.exhausted());
-  EXPECT_NEAR(users.Peek()->weight, 1.0, 1e-9);  // 学习词未被加成
+  EXPECT_NEAR(users.Peek()->weight, system_top - 1.0,
+              1e-9);  // 学习词保持原权重，未被加成
 }
 
 // J5：读音隔离——FilterPinnedStatic 在 isolate 模式下按读音分桶：

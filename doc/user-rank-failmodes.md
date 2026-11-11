@@ -52,4 +52,19 @@
 | M7 | user_rank.cc RankReading：锚点直接用 pin.position 对应原权重（不插缝） | J1/J2 |
 | M8 | user_rank.cc ApplyEqualLengthPriority：加成偏移置 0 | J3 |
 | M9 | user_rank.cc ApplyEqualLengthPriority：manually_ranked 判断去掉 | J4 |
-| M10 | user_rank_math.h PreferPinnedOnTie：恒 true | J6 |
+| M10 | user_rank_math.h PreferPinnedOnTie：恒 true | J6（波及 user_rank_math_test.EqualWeightUsesPosition） |
+| M11 | user_rank.cc HasManualPin：去掉精确匹配门槛 | J7 |
+
+## 红绿闭环记录（校机 WIN11-HV1，mingw64）
+
+基线 367/367 绿（360 + 本组 7）→ M6→J1/J2/J5（过滤契约三处同红）；
+M7→J1/J2（不插缝即越位）；M8→J3；M9→J4；M10→J6；M11→J7。
+还原后 367/367 复绿。7 个用例各自至少红过一次。
+
+**测试设计要点（实测踩到）**：
+- 词典编译后权重是**对数域**（yaml 里 100 的频率 → 约 -13.8），
+  断言不能用线性字面量，要用 probe 迭代器实测值锚定。
+- 学习加成是 **max(自身, 榜首+偏移)** 不是累加：自身权重已高于榜首时
+  加成不可见（J3/J4 都踩过），测试输入必须压到榜首之下。
+- 锚点相对"**过滤后**"的系统侧计算（FilterPinnedStatic 先于 RankReading）：
+  J1 断言"压过过滤后首位、低于原首位"。
