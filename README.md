@@ -118,6 +118,30 @@ TopWeightsByCode 与 script_translator 的集成、symlink 逃逸
   不是累加。三处断言因想象值域返工。写断言前先跑一次探针打印实际值，
   确认值域与语义（max 还是累加、恒等时输出什么），再固化断言。
 
+### 13. 不要从裸指针造第二个 owning shared_ptr
+
+- `storage_identity()` 返回裸指针（`.get()` 的别名）。图省事包成
+  `an<Db>(db_.get())` 会造出**第二个控制块**——同一对象被两个控制块各删一次，
+  析构期 SIGSEGV（gdb 栈：`~Memory → ~UserDictionary →
+  _M_release_last_use_cold` → 野指针调用，实测踩过）。
+  共享已被持有的对象一律用裸指针或 `weak_ptr`，不接管所有权。
+
+### 14. 测"转移/交接"类契约必须重叠生命周期
+
+- 写者析构把身份转给幸存者的契约：若第二个实例在第一个**析构后**才创建，
+  对象池会重建新实例（新 storage 指针），转移代码路径根本没被走到——
+  变异"去掉转移"照样绿（假覆盖），残条目还会被地址复用随机毒化后续用例。
+  正确做法：用 `unique_ptr` 重叠生命周期（第二个在第一个存活期间创建，
+  共享同一 storage），`reset()` 触发析构后再断言转移结果。
+
+### 15. 库内键与快照键的规范化差异
+
+- 用户库内键 = `code + 空格 + \t + text`（code 尾带空格）；
+  TSV 快照行是**规范化键**（码尾空格剥除）。往库里写的键带码尾空格，
+  在快照里找它必须按规范化后的形式——两处断言用错形式就假红。
+- 另外：池化句柄上 `Close → OpenReadOnly` 会硬崩，落盘证明走
+  `Backup()` 快照（其可靠性已由 U3 验证）或句柄内读。
+
 ## 四、覆盖现状（全部经校机红绿闭环，每个用例见过红）
 
 | 切片 | 登记 | 用例 |
@@ -130,6 +154,7 @@ TopWeightsByCode 与 script_translator 的集成、symlink 逃逸
 | 部署编译 | doc/rewrite-compiler-failmodes.md（D） | 15 |
 | 词典管理 | doc/user-dict-manager-failmodes.md（U） | 7 |
 | 用户词调序 | doc/user-rank-failmodes.md（J） | 7 |
+| Memory 注册表 + 会话生命周期 | doc/memory-registry-failmodes.md（MR） | 6 |
 | 数学原语 | （上游既有 user_rank_math_test.cc） | 3 |
 
 明确排除（理由见各登记表与上文导读"没测什么"）：故障注入三件套、
