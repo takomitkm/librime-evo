@@ -7,62 +7,70 @@
 
 ## 导读（先看这里）
 
-**查出了什么**：67 个契约点、约 30 次变异攻击，**没有发现源码 bug**——
-所有"红"最终归因到测试自身的假设错误。本文记录的是锐边、契约和教训，不是 bug 单。
+**查出了什么**：79 个契约点、约 50 次变异攻击，**没有发现源码 bug**——
+所有"红"最终归因到测试自身的假设错误。本文记录的是观察、契约和教训，不是 bug 单。
 
-**问题在哪**：
+**记录分三类**（本项目仍在测试中、未正式发布，故一律按"观察"而非"缺陷"定级）：
 
-| 类别 | 位置 | 现状 |
+| 类别 | 位置 | 定性 |
 |---|---|---|
-| API 锐边 2 则（改进建议） | 本文第一节 1、2 | **暂不提上游**（决策见下） |
+| API 形状观察 2 则 | 本文第一节 1、2 | 当前调用方用法正确，**非缺陷**；未来新增调用方时留意 |
 | 有意不兼容 1 则 | 本文第一节 3 | 设计决策，不做兼容 |
 | 设计契约 4 则 | 本文第二节 4-7 | 调用方须知，非 bug |
-| 测试基建教训 4 则 | 本文第三节 8-11 | 写测试的人看 |
+| 测试基建教训 8 则 | 本文第三节 8-15 | 写测试的人看 |
 
-**测了什么**：四节覆盖表列出的 7 个切片 67 个用例（`test/*.cc`），
+**测了什么**：四节覆盖表列出的 9 个切片 79 个用例（`test/*.cc`），
 全部经校机红绿闭环、每个用例亲眼见过红；每条失效模式绑定登记表
 （`doc/*-failmodes.md`，含变异归因）。
 
 **没测什么（排除项及理由）**：各登记表的"排除项"小节；汇总——
 故障注入三件套（OOM/掉电/IO，需注入基建）、多进程部署并发、
-Synchronize 多设备编排、16MiB 单行上限、user_rank_actions 编辑动作
-（需 Engine/Context 交互）、RankReading 同权稳定序细节、
-TopWeightsByCode 与 script_translator 的集成、symlink 逃逸
-（SafePath 系列已覆盖）、大改的既有文件内部
-（gear/memory.cc、script_translator.cc、deployment_tasks.cc——有间接覆盖，
-单独切片待续）。
+Synchronize 多设备编排、16MiB 单行上限、OnUnhandledKey 键事件层、
+InsertPosition/promote_on_types（翻译层消费）、
+symlink 逃逸（SafePath 系列已覆盖）、大改的既有文件内部
+（gear/memory.cc 的 OnCommit 已单列切片；script_translator.cc 与
+deployment_tasks.cc 有间接覆盖，见对应登记表排除项）。
 
 **决策记录**：
 
 - 上游 1.x 用户库不兼容（第一节 3）是**有意设计**（新五槽格式是新架构的前提），
   不做 legacy reader、不发 issue。
-- API 锐边 1（writer 调用序静默旁路）**暂不提上游**；锐边 2（失败后滞留）
-  跟随 1 一并搁置。两条已完整记录在案，将来要提时直接引用。
+- 第一节 1、2 两条**不是缺陷**：唯一调用方（`rewrite_compiler.cc` /
+  `deployment_tasks.cc`）用法正确，失败路径已核实全覆盖（见各条）。它们是
+  "若将来新增第二个调用方，注意这两处"的备忘，**不作为 issue 提给上游**。
 
 ---
 
-## 一、API 锐边（改进建议，暂不提上游）
+## 一、API 形状观察（非缺陷）
 
-### 1. RewriteStoreWriter 调用序陷阱：反序不报错，静默旁路事务
+### 1. RewriteStoreWriter 有调用序依赖：BeginWorkspace 注册 → Open 加入
 
-- 正确序：一次性 writer 只调 `BeginWorkspace()` 注册进程级事务 →
+- 正确序：一次性 writer 调 `BeginWorkspace()` 注册进程级 workspace →
   干活的 writer 用 `Open()` 加入后才进事务（`rewrite_compiler.cc` 的两步式）。
-- 反序（`Open()` 先于 `BeginWorkspace()`）：事务根本不挂上——
-  `CommitSchema` **静默直提**、`CommitWorkspace` **恒 false**、
-  注册表条目滞留并毒化同路径的后续操作（再 BeginWorkspace 报 already active）。
-- 生产代码用对了；任何新调用方都可能踩。收紧方向：反序时显式报错，
-  或 `Open()` 顺带注册。
+- 反序（`Open()` 先于 `BeginWorkspace()`）：事务不挂上——`CommitSchema` 直提、
+  `CommitWorkspace` 返回 false、注册表留下一条无人使用的条目。
+- **定级**：当前唯一调用方用法正确，`deployment_tasks.cc` 走的是
+  `RewriteCompiler::BeginWorkspace/AbortWorkspace/FinalizeWorkspace` 静态接口
+  （内部即该两步式），无现实触发路径。错序的实际后果是"事务语义没生效"，
+  回滚基线仍正确（BeginWorkspace 会以当前文件状态为基线），不损坏数据。
+- 留记原因：将来若新增第二个调用方，这是最容易踩的一处；可考虑让 `Open()`
+  顺带注册，或反序时显式报错。
 
-### 2. CommitWorkspace 失败后必须 AbortWorkspace 解锁
+### 2. CommitWorkspace 拒交后需 AbortWorkspace 才能解锁该路径
 
-- 拒交（含 `MarkWorkspaceFailed` 之后）不清理注册表，同路径被锁死，
-  直到显式 `AbortWorkspace()`。生产侧失败分支是否每处都 Abort 未逐一核实。
+- 拒交（含 `MarkWorkspaceFailed` 之后）不清理注册表，同路径会显示
+  "workspace transaction already active"，直到显式 `AbortWorkspace()`。
+- **已核实无实际影响**：`deployment_tasks.cc` 的失败路径覆盖完整——
+  `scheduler.Run` 失败 → Abort；`FinalizeWorkspace` 失败 → Abort；
+  单 schema 编译失败 → `MarkWorkspaceFailed` → 传导到 `CommitWorkspace` 拒交 →
+  `FinalizeWorkspace` 返回 false → 同样落到 Abort 分支。**不存在注册表泄漏。**
+- 留记原因：同上，属于"新增调用方时留意"的备忘。
 
 ### 3. 上游老用户库静默失效（有意不兼容）
 
 - evo 的五槽 CSV 值格式没有 legacy reader：上游 1.x 的三字段用户库
   升级到 evo 后，学习数据（词频/时间戳）静默作废，无迁移提示、无告警。
-- **定性：有意设计**（amzxyz），不做兼容层。
+- **定性：有意设计**（amzxyz），新格式是新架构的前提。不做兼容层、不发 issue。
 
 ## 二、设计契约（调用方必须知道，不是 bug）
 
@@ -155,7 +163,11 @@ TopWeightsByCode 与 script_translator 的集成、symlink 逃逸
 | 词典管理 | doc/user-dict-manager-failmodes.md（U） | 7 |
 | 用户词调序 | doc/user-rank-failmodes.md（J） | 7 |
 | Memory 注册表 + 会话生命周期 | doc/memory-registry-failmodes.md（MR） | 6 |
+| 编辑-学习编排（菜单手排 / 提交学习） | doc/editor-learning-failmodes.md（EL） | 6 |
 | 数学原语 | （上游既有 user_rank_math_test.cc） | 3 |
 
+合计 **79 个用例**（本仓库新增 76 + 上游既有 3）。
+
 明确排除（理由见各登记表与上文导读"没测什么"）：故障注入三件套、
-多进程部署并发、Synchronize 多设备编排、16MiB 单行上限。
+多进程部署并发、Synchronize 多设备编排、16MiB 单行上限、OnUnhandledKey 键事件层、
+InsertPosition/promote_on_types（翻译层消费）、symlink 逃逸（SafePath 已覆盖）。
