@@ -224,11 +224,15 @@ TEST_F(RimeEditorLearningTest, MenuMoveDownPinsBelowNeighbor) {
 }
 
 // EL3：MoveUp 遇已手排邻词 → 交换位置（好↔郝）。
+// 先制造未提交的学习会话：FinishSharedSession 的真实用途就是在手排前
+// 把它落盘，否则 LevelDb 已在事务中，MoveAdjacent 的 BeginTransaction 会失败。
 TEST_F(RimeEditorLearningTest, MenuMoveUpSwapsWithPinnedNeighbor) {
   Db* db = nullptr;
   auto* mem = MakeMemory(
       "translator", {{kHaoKey, "1,1,1,0,0"}, {kHaoPinKey, "2,1,8,1,7"}}, &db);
   Context* ctx = engine_->context();
+  EXPECT_TRUE(mem->StartSession());
+  EXPECT_TRUE(db->Update("ni \t新", "1,1,1,0,0"));
   // 菜单 [郝(已钉 1), 好(未钉)]，选中 idx1=好，上移 → 与郝交换。
   SetComposition(ctx, {MakePhrase(mem, "郝"), MakePhrase(mem, "好")}, 1);
 
@@ -236,6 +240,9 @@ TEST_F(RimeEditorLearningTest, MenuMoveUpSwapsWithPinnedNeighbor) {
                                          user_rank::EditAction::kMoveUp));
   EXPECT_EQ(1, StateVia(db, kHaoKey).position);     // 好 顶到 1
   EXPECT_EQ(2, StateVia(db, kHaoPinKey).position);  // 郝 换到 2
+  string pending;
+  // 会话已由 FinishSharedSession 落盘
+  EXPECT_TRUE(db->Fetch("ni \t新", &pending));
 }
 
 // EL4：ResetAuto 只清自动学习，手排保留。

@@ -55,3 +55,22 @@ language 指针指向被测 Memory 的 language）。
 | P2 | user_rank_actions.cc：去掉 FinishSharedSession 调用 | EL3（会话冲突使手排失败） |
 | P3 | user_rank_actions.cc：MoveManualOneStep 方向取反 | EL2 |
 | P4 | user_rank_actions.cc：reset_auto/reset_manual 分支互换 | EL4、EL5 |
+
+## 红绿闭环记录（校机 WIN11-HV1，mingw64）
+
+基线 380/380 绿（374 + 本组 6）→ P1→EL6；P3→EL2/EL3（方向互换两例同红）；
+P4→EL4/EL5；P2→EL3。还原后 380/380 复绿。6 个用例各自至少红过一次。
+
+**P2 首轮未红的教训**：FinishSharedSession 无待提交会话时提前返回 true，
+删不删都一样——EL3 原版没有制造"未提交学习会话"前置。强化后（先
+StartSession+写入再手排）P2 打红。**测"前置清理"类调用必须先制造
+它要清理的状态**，否则调用是死代码。
+
+**夹具三坑（实测）**：
+1. ConfirmCurrentSelection 对 kGuess 段只确认不上屏——不触发 commit
+   通知。上屏用显式 ctx->Commit()（段先标 kConfirmed 走 OnCommit 立即
+   保存分支）。
+2. 断言走池内句柄（storage_identity 裸指针）：第二句柄撞 LevelDb LOCK；
+   池化句柄 Close→OpenReadOnly 也崩。
+3. mem->user_dict()->storage_identity() 返回裸指针，绝不包 owning
+   shared_ptr（教训 13 同款）。
